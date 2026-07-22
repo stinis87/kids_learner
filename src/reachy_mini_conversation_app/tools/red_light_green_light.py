@@ -1,7 +1,7 @@
 import random
 import asyncio
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Literal
 
 import numpy as np
 
@@ -12,12 +12,15 @@ from reachy_mini_conversation_app.dance_emotion_moves import GotoQueueMove
 
 logger = logging.getLogger(__name__)
 
-# Body/head yaw used to "look away", matching sweep_look's convention.
-_LOOK_AWAY_YAW = 0.9 * np.pi
+Phase = Literal["green_light", "red_light"]
+
+# 0.97*pi (not a full pi) to turn fully away from the user while staying clear of the
+# body_yaw +-pi wraparound boundary, following sweep_look's convention.
+_LOOK_AWAY_YAW = 0.97 * np.pi
 _LOOK_AWAY_DURATION_S = 0.8
 _GREEN_LIGHT_MIN_S = 1.0
-_GREEN_LIGHT_MAX_S = 3.0
-_TURN_BACK_DURATION_S = 0.4
+_GREEN_LIGHT_MAX_S = 5.0
+_TURN_BACK_DURATION_S = 0.35
 _TURN_SETTLE_BUFFER_S = 0.1
 _MOTION_SAMPLE_COUNT = 5
 _MOTION_SAMPLE_INTERVAL_S = 0.12
@@ -25,44 +28,57 @@ _MOTION_DIFF_THRESHOLD = 8.0
 
 
 class RedLightGreenLight(Tool):
-    """Play one full round of Red Light, Green Light with the user."""
+    """Play one phase of Red Light, Green Light with the user."""
 
     name = "red_light_green_light"
     description = (
-        "Play one round of Red Light, Green Light. Reachy turns away on its own (green light — the "
-        "user is free to move), waits a short, randomized moment it decides itself, then whips back "
-        "around (red light) and checks the camera for movement, returning caught=true if the user was "
-        "still moving. Say something in character before calling it (e.g. 'Green light, go!') and "
-        "narrate the result once you get it (call the user out if caught, praise them if still). Call "
-        "this tool again for each new round, keep playing until the user asks to stop, then call "
-        "move_head with direction='front' to face them again. Requires the camera; do not use if the "
-        "camera is disabled."
+        "Play Red Light, Green Light, one phase per call. Step 1: say 'Green light!' out loud AS you "
+        "call this tool with phase='green_light' — Reachy turns fully away from the user (they may move "
+        "now) and internally waits a short randomized moment (up to 5 seconds) that it decides itself. "
+        "Step 2: the instant that call returns, without waiting for the user to say or do anything, say "
+        "'Red light!' and immediately call this tool again with phase='red_light' — Reachy whips back "
+        "around and checks the camera, returning caught=true if the user was still moving. Narrate that "
+        "result right away (call them out if caught, praise them if still). Repeat this green_light then "
+        "red_light sequence for as many rounds as the user wants, always chaining red_light right after "
+        "green_light on your own. When the user asks to stop, call move_head with direction='front' to "
+        "face them again. Requires the camera; do not use if the camera is disabled."
     )
     parameters_schema = {
         "type": "object",
-        "properties": {},
-        "required": [],
+        "properties": {
+            "phase": {
+                "type": "string",
+                "enum": ["green_light", "red_light"],
+                "description": (
+                    "'green_light' to turn away and wait a randomized moment; "
+                    "'red_light' to turn back fast and check for movement."
+                ),
+            },
+        },
+        "required": ["phase"],
     }
 
     async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
-        """Play one round: turn away, wait a random short time, turn back fast, and check for movement."""
+        """Run the requested phase of the game."""
         if not deps.camera_enabled:
             return {"error": "Camera is disabled"}
 
-        logger.info("Tool call: red_light_green_light")
+        phase_raw = kwargs.get("phase")
+        if phase_raw not in ("green_light", "red_light"):
+            return {"error": "phase must be 'green_light' or 'red_light'"}
+        phase: Phase = phase_raw
+        logger.info("Tool call: red_light_green_light phase=%s", phase)
 
         try:
-            green_light_duration = random.uniform(_GREEN_LIGHT_MIN_S, _GREEN_LIGHT_MAX_S)
-            await self._look_away(deps)
-            await asyncio.sleep(green_light_duration)
-            caught = await self._turn_and_check(deps)
-            return {"status": "red light", "caught": caught, "green_light_seconds": round(green_light_duration, 1)}
+            if phase == "green_light":
+                return await self._look_away_and_wait(deps)
+            return await self._turn_and_check(deps)
         except Exception as e:
             logger.error("red_light_green_light failed")
             return {"error": f"red_light_green_light failed: {type(e).__name__}: {e}"}
 
-    async def _look_away(self, deps: ToolDependencies) -> None:
-        """Turn the head and body away so the user can move freely."""
+    async def _look_away_and_wait(self, deps: ToolDependencies) -> Dict[str, Any]:
+        """Turn fully away from the user, then wait a randomized short moment before returning."""
         deps.movement_manager.clear_move_queue()
 
         current_head_pose = deps.reachy_mini.get_current_head_pose()
@@ -83,8 +99,16 @@ class RedLightGreenLight(Tool):
         deps.movement_manager.set_moving_state(_LOOK_AWAY_DURATION_S)
         await asyncio.sleep(_LOOK_AWAY_DURATION_S)
 
-    async def _turn_and_check(self, deps: ToolDependencies) -> bool:
-        """Turn back to face the user fast, then check the camera for movement. Returns True if caught."""
+        green_light_duration = random.uniform(_GREEN_LIGHT_MIN_S, _GREEN_LIGHT_MAX_S)
+        await asyncio.sleep(green_light_duration)
+
+        return {
+            "status": "time is up, say 'Red light!' and call phase='red_light' now",
+            "green_light_seconds": round(green_light_duration, 1),
+        }
+
+    async def _turn_and_check(self, deps: ToolDependencies) -> Dict[str, Any]:
+        """Turn back to face the user fast, then check the camera for movement."""
         deps.movement_manager.clear_move_queue()
 
         current_head_pose = deps.reachy_mini.get_current_head_pose()
@@ -118,4 +142,6 @@ class RedLightGreenLight(Tool):
             raise RuntimeError("No frame available")
 
         max_diff = max(float(np.abs(frames[i] - frames[i - 1]).mean()) for i in range(1, len(frames)))
-        return bool(max_diff > _MOTION_DIFF_THRESHOLD)
+        caught = bool(max_diff > _MOTION_DIFF_THRESHOLD)
+
+        return {"status": "red light", "caught": caught}

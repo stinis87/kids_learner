@@ -195,7 +195,7 @@ The default profile exposes these tools. Custom profiles can enable a different 
 | `idle_do_nothing` | Explicitly remain idle during an idle turn. Not intended for normal conversation turns. | Core install only. |
 | `move_head` | Queue a head pose change (left/right/up/down/front). | Core install only. |
 | `head_tracking` | Follow the user's face with the head, or stop following. | Core install only. Requires a daemon with the `vision` extra and a camera. |
-| `red_light_green_light` | Play one round of Red Light, Green Light: turns away for a random short moment it decides itself, then whips back and checks the camera for movement. | Core install only. Requires the camera (disable with `--no-camera`). |
+| `red_light_green_light` | Play Red Light, Green Light: turn away and wait a randomized moment (`phase=green_light`), then turn back fast and check for movement (`phase=red_light`). | Core install only. Requires the camera (disable with `--no-camera`). |
 | `go_to_sleep` | Run Reachy's sleep movement and stop the current app after an explicit user request. | Core install only. |
 | `sweep_look` | Sweep Reachy's head left, right, and back to center. | Bundled default profile tool. |
 | `remember` | Save one short, stable fact about the user for future sessions. | Core install only. Stored in the app instance data directory. |
