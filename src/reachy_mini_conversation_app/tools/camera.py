@@ -17,11 +17,15 @@ class Camera(Tool):
         "Use this when the user asks you to look at something, see what they are holding, "
         "check their appearance, describe the scene, or comment on how they look. "
         "Also use it when the user asks what you can see or wants your visual opinion. "
-        "The camera is live, each call captures the current moment. "
+        "The camera is live: call this tool again every single time the user asks a new visual question, "
+        "even if you already took a picture earlier in the conversation — the scene may have changed "
+        "(they may be holding something new, have moved, etc.), and an older picture in the conversation "
+        "history is never a substitute for a fresh one. "
         "If the user asks you to look without saying at what, do not ask for clarification, call this tool and describe what you see. "
-        "This applies no matter what language the user asks in — e.g. Norwegian 'hva er dette', "
-        "'hva holder jeg', 'hva ser du' are the same request as their English equivalents and must "
-        "trigger this tool too, not just a spoken guess."
+        "This applies no matter what language the user asks in — Norwegian requests like 'hva er dette', "
+        "'hva holder jeg', 'hva ser du', 'ser du...', 'beskriv hva du ser', and 'hvem er jeg' are the same "
+        "kind of request as their English equivalents and must always trigger a fresh call to this tool, "
+        "not a spoken guess or a reused earlier picture."
     )
     parameters_schema = {
         "type": "object",
