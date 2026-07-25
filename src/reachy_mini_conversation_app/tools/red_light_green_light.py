@@ -1,7 +1,7 @@
 import random
 import asyncio
 import logging
-from typing import Any, Dict, Tuple, Literal
+from typing import Any, Dict, Tuple
 
 import numpy as np
 
@@ -12,8 +12,6 @@ from reachy_mini_conversation_app.dance_emotion_moves import GotoQueueMove
 
 
 logger = logging.getLogger(__name__)
-
-Phase = Literal["green_light", "red_light"]
 
 # Timings and thresholds mirror the "expert mode" of this game
 # (ChristmasTree/expert-red-light-green-light): quick head-hide/reveal snaps, antennas
@@ -42,52 +40,38 @@ _ANTENNAS_CALLING_OUT: Tuple[float, float] = (0.5, -0.5)
 
 
 class RedLightGreenLight(Tool):
-    """Play one phase of Red Light, Green Light with the user."""
+    """Play one full round of Red Light, Green Light with the user."""
 
     name = "red_light_green_light"
     description = (
-        "Play Red Light, Green Light, one phase per call. Step 1: say 'Green light!' out loud AS you "
-        "call this tool with phase='green_light' — Reachy tucks its head down to hide its eyes (they may "
-        "move now) for a short randomized moment (usually under 2.5 seconds, occasionally a lightning-fast "
-        "fake-out) that it decides itself. Step 2: the instant that call returns, without waiting for the "
-        "user to say or do anything, say 'Red light!' and immediately call this tool again with "
-        "phase='red_light' — Reachy snaps its head up and watches the camera for several seconds, and if "
-        "it catches someone moving it immediately turns to look right at them, returning caught=true. "
-        "Narrate that result right away (call them out if caught, praise them if still). Repeat this "
-        "green_light then red_light sequence for as many rounds as the user wants, always chaining "
-        "red_light right after green_light on your own. When the user asks to stop, call move_head with "
-        "direction='front' to face them again. Requires the camera; do not use if the camera is disabled."
+        "Play one full round of Red Light, Green Light per call — this single call covers both the "
+        "green light and red light phases, so never split a round across two calls and never wait for "
+        "the user to say anything in between. Say 'Green light!' out loud AS you call this tool. Reachy "
+        "then tucks its head down to hide its eyes (they may move now) for a short randomized moment, "
+        "occasionally a lightning-fast fake-out, before snapping back up on its own to watch the camera "
+        "for several seconds and turning to look right at anyone it catches moving. The call does not "
+        "return until all of that has finished, so as soon as it returns say 'Red light!' plus the "
+        "verdict right away (call them out if caught=true, praise them if still). Call this tool again "
+        "immediately to start the next round for as many rounds as the user wants. When the user asks "
+        "to stop, call move_head with direction='front' to face them again. Requires the camera; do not "
+        "use if the camera is disabled."
     )
     parameters_schema = {
         "type": "object",
-        "properties": {
-            "phase": {
-                "type": "string",
-                "enum": ["green_light", "red_light"],
-                "description": (
-                    "'green_light' to hide its eyes and wait a randomized moment; "
-                    "'red_light' to snap back up and watch for movement."
-                ),
-            },
-        },
-        "required": ["phase"],
+        "properties": {},
     }
 
     async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
-        """Run the requested phase of the game."""
+        """Run one full green-light/red-light round."""
         if not deps.camera_enabled:
             return {"error": "Camera is disabled"}
 
-        phase_raw = kwargs.get("phase")
-        if phase_raw not in ("green_light", "red_light"):
-            return {"error": "phase must be 'green_light' or 'red_light'"}
-        phase: Phase = phase_raw
-        logger.info("Tool call: red_light_green_light phase=%s", phase)
+        logger.info("Tool call: red_light_green_light")
 
         try:
-            if phase == "green_light":
-                return await self._hide_and_wait(deps)
-            return await self._watch_for_movement(deps)
+            green_light_result = await self._hide_and_wait(deps)
+            red_light_result = await self._watch_for_movement(deps)
+            return {**green_light_result, **red_light_result}
         except Exception as e:
             logger.error("red_light_green_light failed")
             return {"error": f"red_light_green_light failed: {type(e).__name__}: {e}"}
@@ -120,7 +104,6 @@ class RedLightGreenLight(Tool):
         await asyncio.sleep(green_light_duration)
 
         return {
-            "status": "time is up, say 'Red light!' and call phase='red_light' now",
             "green_light_seconds": round(green_light_duration, 2),
             "fakeout": is_fakeout,
         }
