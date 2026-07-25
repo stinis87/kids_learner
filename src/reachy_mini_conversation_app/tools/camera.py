@@ -21,6 +21,8 @@ class Camera(Tool):
         "even if you already took a picture earlier in the conversation — the scene may have changed "
         "(they may be holding something new, have moved, etc.), and an older picture in the conversation "
         "history is never a substitute for a fresh one. "
+        "Never say you need to take a picture or ask for permission/confirmation first — there is no "
+        "confirmation step, just call this tool right away in the same turn and then answer from the result. "
         "If the user asks you to look without saying at what, do not ask for clarification, call this tool and describe what you see. "
         "This applies no matter what language the user asks in — Norwegian requests like 'hva er dette', "
         "'hva holder jeg', 'hva ser du', 'ser du...', 'beskriv hva du ser', and 'hvem er jeg' are the same "
