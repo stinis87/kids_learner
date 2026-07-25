@@ -940,7 +940,8 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         """Receive audio frame from the microphone and send it to the realtime server.
 
         Handles both mono and stereo audio formats, converting to the expected
-        mono format for the realtime API.
+        mono format for the realtime API. Frames are dropped while the wake-word
+        gate is closed, so Reachy only reacts once it has been woken up.
 
         Args:
             frame: A tuple containing (sample_rate, audio_data).
@@ -949,7 +950,7 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         if not self.connection:
             return
 
-        _, audio_frame = frame
+        sample_rate, audio_frame = frame
         if audio_frame.size == 0:
             return
 
@@ -965,6 +966,9 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         # Cast if needed
         audio_frame = audio_to_int16(audio_frame)
 
+        if not await self._gate_audio_frame(sample_rate, audio_frame):
+            return
+
         # Send to the realtime input buffer (guard against races during reconnect).
         try:
             audio_message = base64.b64encode(audio_frame.tobytes()).decode("utf-8")
@@ -972,6 +976,15 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         except Exception as e:
             logger.debug("Dropping audio frame: connection not ready (%s)", e)
             return
+
+    async def _clear_pending_input_audio(self) -> None:
+        """Discard buffered realtime input audio so trailing wake-word audio isn't committed."""
+        if not self.connection:
+            return
+        try:
+            await self.connection.input_audio_buffer.clear()
+        except Exception as e:
+            logger.debug("Could not clear input audio buffer (%s)", e)
 
     async def shutdown(self) -> None:
         """Shutdown the handler."""

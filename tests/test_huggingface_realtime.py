@@ -3,6 +3,7 @@ import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
 
 import reachy_mini_conversation_app.conversation_handler as conv_mod
@@ -50,6 +51,9 @@ def _make_fake_realtime_client(
             pass
 
         async def cancel(self, **_kw: Any) -> None:
+            pass
+
+        async def clear(self, **_kw: Any) -> None:
             pass
 
     class FakeConversation:
@@ -408,3 +412,54 @@ async def test_change_voice_updates_live_hf_session_without_restart(monkeypatch:
     restart.assert_not_awaited()
     session = captured_update["session"]
     assert session["audio"]["output"]["voice"] == "Serena"
+
+
+class _StubWakeWordGate:
+    """A minimal wake-word gate stand-in with a scripted active/process transition."""
+
+    def __init__(self, *, active: bool, next_active: bool | None = None) -> None:
+        self.active = active
+        self._next_active = active if next_active is None else next_active
+
+    def process(self, _sample_rate: int, _audio_frame: Any) -> None:
+        self.active = self._next_active
+
+
+@pytest.mark.asyncio
+async def test_receive_drops_audio_while_wake_word_gate_is_inactive() -> None:
+    """receive() must not forward mic audio to the backend while the wake-word gate is closed."""
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler.connection = AsyncMock()
+    handler.connection.input_audio_buffer = AsyncMock()
+    handler._wake_word_gate = _StubWakeWordGate(active=False)
+
+    await handler.receive((16000, np.zeros(320, dtype=np.int16)))
+
+    handler.connection.input_audio_buffer.append.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_receive_forwards_audio_once_wake_word_gate_is_active() -> None:
+    """receive() forwards mic audio to the backend once the wake-word gate is open."""
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler.connection = AsyncMock()
+    handler.connection.input_audio_buffer = AsyncMock()
+    handler._wake_word_gate = _StubWakeWordGate(active=True)
+
+    await handler.receive((16000, np.zeros(320, dtype=np.int16)))
+
+    handler.connection.input_audio_buffer.append.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_receive_clears_input_buffer_when_gate_closes_mid_utterance() -> None:
+    """Deactivating the gate mid-frame clears any trailing wake-word audio from the buffer."""
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler.connection = AsyncMock()
+    handler.connection.input_audio_buffer = AsyncMock()
+    handler._wake_word_gate = _StubWakeWordGate(active=True, next_active=False)
+
+    await handler.receive((16000, np.zeros(320, dtype=np.int16)))
+
+    handler.connection.input_audio_buffer.clear.assert_awaited_once()
+    handler.connection.input_audio_buffer.append.assert_not_awaited()

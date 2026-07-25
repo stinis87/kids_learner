@@ -120,6 +120,29 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return default
 
 
+WAKE_WORD_ENABLED_ENV = "WAKE_WORD_ENABLED"
+WAKE_WORD_MODEL_ENV = "WAKE_WORD_MODEL"
+WAKE_WORD_THRESHOLD_ENV = "WAKE_WORD_THRESHOLD"
+DEFAULT_WAKE_WORD_MODEL = "hey_jarvis"
+DEFAULT_WAKE_WORD_THRESHOLD = 0.5
+
+
+def _resolve_wake_word_threshold() -> float:
+    """Read the wake-word detection threshold (0-1) from the environment."""
+    raw_value = os.getenv(WAKE_WORD_THRESHOLD_ENV, "").strip()
+    if not raw_value:
+        return DEFAULT_WAKE_WORD_THRESHOLD
+    try:
+        threshold = float(raw_value)
+    except ValueError:
+        logger.warning("Ignoring invalid %s=%r; using default.", WAKE_WORD_THRESHOLD_ENV, raw_value)
+        return DEFAULT_WAKE_WORD_THRESHOLD
+    if not 0.0 < threshold <= 1.0:
+        logger.warning("Ignoring out-of-range %s=%r; using default.", WAKE_WORD_THRESHOLD_ENV, raw_value)
+        return DEFAULT_WAKE_WORD_THRESHOLD
+    return threshold
+
+
 APP_TIMEOUT_MINUTES_ENV = "REACHY_MINI_APP_TIMEOUT_MINUTES"
 DEFAULT_APP_TIMEOUT_MINUTES = 1440.0
 
@@ -306,6 +329,10 @@ class Config:
     REALTIME_TRANSCRIPTION_LANGUAGE = _normalize_transcription_language(os.getenv(REALTIME_TRANSCRIPTION_LANGUAGE_ENV))
     HF_TOKEN = os.getenv("HF_TOKEN")  # Optional, falls back to hf auth login if not set
 
+    WAKE_WORD_ENABLED = _env_flag(WAKE_WORD_ENABLED_ENV, default=True)
+    WAKE_WORD_MODEL = os.getenv(WAKE_WORD_MODEL_ENV, "").strip() or DEFAULT_WAKE_WORD_MODEL
+    WAKE_WORD_THRESHOLD = _resolve_wake_word_threshold()
+
     logger.debug(
         "HF mode: %s, HF session URL set: %s, HF direct URL set: %s",
         HF_REALTIME_CONNECTION_MODE,
@@ -413,6 +440,9 @@ def refresh_runtime_config_from_env() -> None:
     )
     config.HF_TOKEN = os.getenv("HF_TOKEN")
     config.REACHY_MINI_CUSTOM_PROFILE = LOCKED_PROFILE or os.getenv("REACHY_MINI_CUSTOM_PROFILE")
+    config.WAKE_WORD_ENABLED = _env_flag(WAKE_WORD_ENABLED_ENV, default=True)
+    config.WAKE_WORD_MODEL = os.getenv(WAKE_WORD_MODEL_ENV, "").strip() or DEFAULT_WAKE_WORD_MODEL
+    config.WAKE_WORD_THRESHOLD = _resolve_wake_word_threshold()
 
 
 def get_available_voices() -> list[str]:

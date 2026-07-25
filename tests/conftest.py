@@ -18,3 +18,7 @@ os.environ["REACHY_MINI_SKIP_DOTENV"] = "1"
 os.environ.pop("REACHY_MINI_CUSTOM_PROFILE", None)
 os.environ.pop("REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY", None)
 os.environ.pop("REACHY_MINI_EXTERNAL_TOOLS_DIRECTORY", None)
+
+# Disable the wake-word gate by default so unrelated tests don't try to download an
+# openWakeWord model over the network. Tests exercising the gate opt back in explicitly.
+os.environ["WAKE_WORD_ENABLED"] = "0"

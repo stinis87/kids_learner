@@ -9,9 +9,14 @@ from collections.abc import Callable
 import numpy as np
 from numpy.typing import NDArray
 
+from reachy_mini.utils import create_head_pose
+from reachy_mini.reachy_mini import SLEEP_HEAD_POSE
+from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.streaming import AdditionalOutputs, AsyncStreamHandler, wait_for_item
+from reachy_mini_conversation_app.wake_word import WakeWordGate
 from reachy_mini_conversation_app.idle_policy import start_idle_tool_call
 from reachy_mini_conversation_app.tools.core_tools import ToolDependencies, get_tool_specs
+from reachy_mini_conversation_app.dance_emotion_moves import GotoQueueMove
 from reachy_mini_conversation_app.tools.background_tool_manager import BackgroundToolManager
 
 
@@ -21,6 +26,13 @@ logger = logging.getLogger(__name__)
 AudioFrame: TypeAlias = tuple[int, NDArray[np.int16]]
 HandlerOutput: TypeAlias = AudioFrame | AdditionalOutputs | None
 QueueItem: TypeAlias = AudioFrame | AdditionalOutputs
+
+# Antenna poses double as a facial expression for the wake-word gate: relaxed/tucked while
+# dormant, perked up and alert once the wake word opens the gate.
+_ANTENNAS_DORMANT: tuple[float, float] = (0.0, 0.0)
+_ANTENNAS_ALERT: tuple[float, float] = (0.6, 0.6)
+_WAKE_WORD_HIDE_DURATION_S = 0.5  # time to tuck the head down, matches red_light_green_light's hide snap
+_WAKE_WORD_POP_UP_DURATION_S = 0.35  # quicker snap back up than hiding
 
 
 class ConversationHandler(AsyncStreamHandler, ABC):
@@ -40,6 +52,11 @@ class ConversationHandler(AsyncStreamHandler, ABC):
         super().__init__()
         self.last_activity_time = time.monotonic()
         self.last_idle_behavior_time = self.last_activity_time
+        self._wake_word_gate = WakeWordGate(
+            enabled=config.WAKE_WORD_ENABLED,
+            model_name=config.WAKE_WORD_MODEL,
+            threshold=config.WAKE_WORD_THRESHOLD,
+        )
 
     def set_activity_observer(self, observer: Callable[[str], None] | None) -> None:
         """Attach or detach an activity observer. Pass None to clear."""
@@ -58,6 +75,52 @@ class ConversationHandler(AsyncStreamHandler, ABC):
     def _idle_behavior_ready(self) -> bool:
         """Return whether idle behavior may run now. Backends can add guards."""
         return True
+
+    async def _gate_audio_frame(self, sample_rate: int, audio_frame: NDArray[np.int16]) -> bool:
+        """Run the wake-word gate on a mic frame; return whether it should be forwarded downstream."""
+        was_active = self._wake_word_gate.active
+        self._wake_word_gate.process(sample_rate, audio_frame)
+        is_active = self._wake_word_gate.active
+        if is_active != was_active:
+            self._queue_wake_word_animation(is_active)
+            if not is_active:
+                await self._clear_pending_input_audio()
+        return is_active
+
+    def _queue_wake_word_animation(self, active: bool) -> None:
+        """Snap the head to alert when the gate opens, or tuck it down when it closes."""
+        try:
+            current_head_pose = self.deps.reachy_mini.get_current_head_pose()
+            head_joints, current_antennas = self.deps.reachy_mini.get_current_joint_positions()
+            current_body_yaw = head_joints[0]
+        except Exception as e:
+            logger.warning("Could not read robot pose for wake-word animation (%s); skipping.", e)
+            return
+
+        if active:
+            target_head_pose = create_head_pose(0, 0, 0, 0, 0, 0, degrees=False)
+            target_antennas = _ANTENNAS_ALERT
+            duration = _WAKE_WORD_POP_UP_DURATION_S
+        else:
+            target_head_pose = SLEEP_HEAD_POSE.astype(np.float32)
+            target_antennas = _ANTENNAS_DORMANT
+            duration = _WAKE_WORD_HIDE_DURATION_S
+
+        move = GotoQueueMove(
+            target_head_pose=target_head_pose,
+            start_head_pose=current_head_pose,
+            target_antennas=target_antennas,
+            start_antennas=(current_antennas[0], current_antennas[1]),
+            target_body_yaw=current_body_yaw,
+            start_body_yaw=current_body_yaw,
+            duration=duration,
+        )
+        self.deps.movement_manager.queue_move(move)
+        self.deps.movement_manager.set_moving_state(duration)
+
+    async def _clear_pending_input_audio(self) -> None:
+        """Discard buffered realtime input audio on gate deactivation. No-op unless overridden."""
+        return None
 
     async def emit(self) -> HandlerOutput:
         """Emit the next queued output, triggering local idle behavior when due."""

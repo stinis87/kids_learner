@@ -24,6 +24,9 @@ dependencies = [
     "reachy_mini_toolbox",
     "reachy-mini>=1.9.0",
     "mcp>=1.27.1",
+
+    #Wake word detection
+    "openwakeword>=0.6.0",
 ]
 
 [dependency-groups]
