@@ -46,33 +46,36 @@ def test_missing_model_fails_open() -> None:
     assert gate.active is True
 
 
-def test_gate_starts_closed_and_opens_on_detection() -> None:
-    """The gate starts closed and only opens once the wake word scores above threshold."""
+def test_gate_starts_open_and_closes_on_detection() -> None:
+    """The gate starts open (awake) and only closes once the wake word scores above threshold."""
     gate = _make_gate([0.1, 0.9])
-    assert gate.active is False
-
-    _feed_chunk(gate)  # score 0.1, below threshold
-    assert gate.active is False
-
-    _feed_chunk(gate)  # score 0.9, triggers activation
     assert gate.active is True
 
+    _feed_chunk(gate)  # score 0.1, below threshold
+    assert gate.active is True
 
-def test_second_detection_toggles_gate_closed_again(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Saying the wake word again toggles the gate back closed."""
+    _feed_chunk(gate)  # score 0.9, triggers deactivation
+    assert gate.active is False
+
+
+def test_second_detection_toggles_gate_open_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Saying the wake word again toggles the gate back open."""
     toggles: list[bool] = []
-    gate = _make_gate([0.9, 0.9], on_toggle=toggles.append)
+    # A 0.0 score between the two utterances mimics the silence gap between separate sayings
+    # of the wake word; the gate only re-arms once the score drops back below threshold.
+    gate = _make_gate([0.9, 0.0, 0.9], on_toggle=toggles.append)
 
     # Force the refractory window closed so the second trigger below is honored immediately.
     monkeypatch.setattr("reachy_mini_conversation_app.wake_word._REFRACTORY_SECONDS", 0.0)
 
     _feed_chunk(gate)
-    assert gate.active is True
-    assert toggles == [True]
-
-    _feed_chunk(gate)
     assert gate.active is False
-    assert toggles == [True, False]
+    assert toggles == [False]
+
+    _feed_chunk(gate)  # silence between utterances
+    _feed_chunk(gate)
+    assert gate.active is True
+    assert toggles == [False, True]
 
 
 def test_refractory_period_prevents_double_toggle_from_one_utterance() -> None:
@@ -80,12 +83,12 @@ def test_refractory_period_prevents_double_toggle_from_one_utterance() -> None:
     gate = _make_gate([0.9, 0.9, 0.9])
 
     _feed_chunk(gate)
-    assert gate.active is True
+    assert gate.active is False
 
     # Immediately repeated high scores (same utterance trailing on) must not re-toggle.
     _feed_chunk(gate)
     _feed_chunk(gate)
-    assert gate.active is True
+    assert gate.active is False
 
 
 def test_inference_failure_disables_gate_and_fails_open() -> None:
@@ -97,7 +100,7 @@ def test_inference_failure_disables_gate_and_fails_open() -> None:
 
     with patch.object(WakeWordGate, "_load_model", return_value=_RaisingModel()):
         gate = WakeWordGate(enabled=True, model_name="hey_jarvis", threshold=0.5)
-    assert gate.active is False
+    assert gate.active is True
 
     _feed_chunk(gate)
     assert gate.active is True

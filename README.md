@@ -110,7 +110,7 @@ Copy `.env.example` to `.env` when you want to point Hugging Face at your own lo
 | `HF_TOKEN` | Optional token for Hugging Face access (for gated/private assets). |
 | `REACHY_MINI_APP_TIMEOUT_MINUTES` | Minutes of inactivity before Reachy goes to sleep and the app stops. Defaults to `1440` (one day); set to `0` to disable. |
 | `WAKE_WORD_ENABLED` | Gate the microphone behind a wake word. Defaults to `1` (enabled). |
-| `WAKE_WORD_MODEL` | Pretrained [openWakeWord](https://github.com/dscripka/openWakeWord) model to listen for. Defaults to `hey_jarvis`. |
+| `WAKE_WORD_MODEL` | Pretrained [openWakeWord](https://github.com/dscripka/openWakeWord) model to listen for. Defaults to `alexa`. |
 | `WAKE_WORD_THRESHOLD` | Detection score (0-1) required to trigger the wake word. Defaults to `0.5`. |
 
 ### Hugging Face Connection Modes
@@ -219,11 +219,11 @@ Built-in motion content is published as open Hugging Face datasets:
 <details>
 <summary><b>Wake word</b></summary>
 
-Reachy ignores the microphone until it hears the wake word (default: "Hey Jarvis"), and goes back to ignoring it when the wake word is said again — no audio reaches the conversation backend while the gate is closed. Detection runs fully on-device using a pretrained [openWakeWord](https://github.com/dscripka/openWakeWord) model, so no extra setup or network access is required beyond the one-time model download on first run.
+Reachy starts awake and listening. Saying the wake word (default: "Alexa") puts it to sleep — no audio reaches the conversation backend while dormant — and saying it again wakes it back up. Detection runs fully on-device using a pretrained [openWakeWord](https://github.com/dscripka/openWakeWord) model, so no extra setup or network access is required beyond the one-time model download on first run.
 
 Reachy tucks its head down and relaxes its antennas while dormant, and snaps back up alert once woken up. If the model can't be loaded (e.g. no network on first run), the app falls back to always listening rather than staying silent.
 
-Set `WAKE_WORD_MODEL` to any other [pretrained openWakeWord model name](https://github.com/dscripka/openWakeWord#pretrained-models) (e.g. `alexa`, `hey_mycroft`), tune sensitivity with `WAKE_WORD_THRESHOLD`, or set `WAKE_WORD_ENABLED=0` to disable the gate entirely.
+Set `WAKE_WORD_MODEL` to any other [pretrained openWakeWord model name](https://github.com/dscripka/openWakeWord#pretrained-models) (e.g. `hey_jarvis`, `hey_mycroft`), tune sensitivity with `WAKE_WORD_THRESHOLD`, or set `WAKE_WORD_ENABLED=0` to disable the gate entirely.
 
 </details>
 

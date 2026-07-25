@@ -1,7 +1,8 @@
-"""Local wake-word gate: mic audio only reaches the conversation backend once activated.
+"""Local wake-word gate: mic audio stops reaching the conversation backend once put to sleep.
 
-Uses openWakeWord's pretrained ONNX models (CPU-only, no custom training). Saying the wake
-word toggles the gate open; saying it again toggles it closed.
+Uses openWakeWord's pretrained ONNX models (CPU-only, no custom training). The gate starts
+open (Reachy awake and listening); saying the wake word toggles it closed, saying it again
+toggles it back open.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ _REFRACTORY_SECONDS = 1.5  # ignore further detections right after a toggle, to 
 
 
 class WakeWordGate:
-    """Gates mic audio behind a wake word, toggling open/closed on repeated detections."""
+    """Gates mic audio behind a wake word; starts open, toggles closed/open on detection."""
 
     def __init__(
         self,
@@ -32,20 +33,22 @@ class WakeWordGate:
         threshold: float,
         on_toggle: Callable[[bool], None] | None = None,
     ) -> None:
-        """Load the wake-word model (if enabled) and start with the gate closed."""
+        """Load the wake-word model (if enabled) and start with the gate already open."""
         self._threshold = threshold
         self._on_toggle = on_toggle
         self._model_name = model_name
         self._model: object | None = None
         self._buffer: NDArray[np.int16] = np.empty((0,), dtype=np.int16)
         self._last_toggle_time = 0.0
-        # Fail open (today's always-listening behavior) when disabled or the model can't load.
-        self.active = not enabled
+        # A single utterance produces several consecutive above-threshold predictions; only
+        # toggle on the rising edge (first frame that crosses the threshold), not every frame.
+        self._above_threshold = False
+        # Reachy starts awake and listening; saying the wake word puts it to sleep, saying it
+        # again wakes it back up. Also fails open if the model can't load.
+        self.active = True
 
         if enabled:
             self._model = self._load_model(model_name)
-            if self._model is None:
-                self.active = True
 
     @staticmethod
     def _load_model(model_name: str) -> object | None:
@@ -93,8 +96,16 @@ class WakeWordGate:
             return
 
         score = predictions.get(self._model_name, 0.0)
+        if score < self._threshold:
+            self._above_threshold = False
+            return
+        if self._above_threshold:
+            # Still the same utterance as the frame that already triggered the toggle.
+            return
+        self._above_threshold = True
+
         now = time.monotonic()
-        if score < self._threshold or (now - self._last_toggle_time) < _REFRACTORY_SECONDS:
+        if (now - self._last_toggle_time) < _REFRACTORY_SECONDS:
             return
 
         self._last_toggle_time = now
