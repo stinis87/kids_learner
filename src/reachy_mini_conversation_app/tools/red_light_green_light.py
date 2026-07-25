@@ -1,7 +1,7 @@
 import random
 import asyncio
 import logging
-from typing import Any, Dict, List, Tuple, Literal
+from typing import Any, Dict, Tuple, Literal
 
 import numpy as np
 
@@ -9,7 +9,6 @@ from reachy_mini.utils import create_head_pose
 from reachy_mini.reachy_mini import SLEEP_HEAD_POSE
 from reachy_mini_conversation_app.tools.core_tools import Tool, ToolDependencies
 from reachy_mini_conversation_app.dance_emotion_moves import GotoQueueMove
-from reachy_mini_conversation_app.tools.people_detector import PeopleDetector, ensure_pose_model_downloaded
 
 
 logger = logging.getLogger(__name__)
@@ -30,10 +29,8 @@ _FAKEOUT_GREEN_S = 0.45
 _RED_LIGHT_MIN_S = 3.0
 _RED_LIGHT_MAX_S = 7.0
 _MOTION_SAMPLE_INTERVAL_S = 0.12
-_POSE_BUFFER_LEN = 5
-# Per-person pose-landmark position std-dev across the buffered frames; above this,
-# a person is flagged as moving. Matches pollen-robotics/red_light_green_light.
-_MOTION_STD_THRESHOLD = 3.0
+# Mean per-pixel brightness change between consecutive frames; above this, someone moved.
+_MOTION_DIFF_THRESHOLD = 8.0
 _CAUGHT_TURN_DURATION_S = 0.3
 _CAUGHT_YAW_RANGE_DEG = (-80.0, 80.0)
 
@@ -75,7 +72,6 @@ class RedLightGreenLight(Tool):
         },
         "required": ["phase"],
     }
-    _detector: "PeopleDetector | None" = None
 
     async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
         """Run the requested phase of the game."""
@@ -151,30 +147,28 @@ class RedLightGreenLight(Tool):
         deps.movement_manager.set_moving_state(_REVEAL_DURATION_S)
         await asyncio.sleep(_REVEAL_DURATION_S + _RED_SETTLE_S)
 
-        detector = await self._get_detector()
-        caught_center, frame_width, frames_read = await self._scan_for_movement(deps, detector)
+        caught_x, frame_width, frames_read = await self._scan_for_movement(deps)
 
         if frames_read < 2:
             raise RuntimeError("No frame available")
 
-        caught = caught_center is not None
-        if caught_center is not None and frame_width is not None:
-            await self._turn_to_caught_player(deps, caught_center, frame_width)
+        caught = caught_x is not None
+        if caught_x is not None and frame_width is not None:
+            await self._turn_to_caught_player(deps, caught_x, frame_width)
 
         return {"status": "red light", "caught": caught}
 
-    async def _scan_for_movement(
-        self, deps: ToolDependencies, detector: PeopleDetector
-    ) -> tuple[Tuple[int, int] | None, int | None, int]:
-        """Watch the camera and return the pixel position of the first person caught moving, if any.
+    async def _scan_for_movement(self, deps: ToolDependencies) -> tuple[float | None, int | None, int]:
+        """Watch the camera and return the pixel x-position of the first movement caught, if any.
 
-        Buffers each detected person's upper-body landmarks across the last few frames and flags
-        movement by the std-dev of their positions (like pollen-robotics/red_light_green_light).
-        Stops as soon as someone is caught instead of always running the full scan window, matching
-        how the expert-mode game snaps to a mover the instant they slip.
+        Diffs each frame against the previous one and flags movement once the mean per-pixel
+        brightness change crosses a threshold, weighting where in the frame that change is
+        concentrated to know which way to turn. Stops as soon as someone is caught instead of
+        always running the full scan window, matching how the expert-mode game snaps to a mover
+        the instant they slip.
         """
         scan_for = random.uniform(_RED_LIGHT_MIN_S, _RED_LIGHT_MAX_S)
-        person_buffers: List[List[List[Tuple[int, int]]]] = []
+        previous_frame: np.ndarray | None = None
         frames_read = 0
         frame_width: int | None = None
         elapsed = 0.0
@@ -184,28 +178,22 @@ class RedLightGreenLight(Tool):
             if frame is not None:
                 frames_read += 1
                 frame_width = frame.shape[1]
-                people = await asyncio.to_thread(detector.detect, frame)
-                while len(person_buffers) < len(people):
-                    person_buffers.append([])
-                for person_index, landmarks in enumerate(people):
-                    buffer = person_buffers[person_index]
-                    buffer.append(landmarks)
-                    del buffer[:-_POSE_BUFFER_LEN]
-                    if len(buffer) >= _POSE_BUFFER_LEN:
-                        score = float(np.std(buffer, axis=0).mean())
-                        if score > _MOTION_STD_THRESHOLD:
-                            return landmarks[0], frame_width, frames_read
+                if previous_frame is not None and previous_frame.shape == frame.shape:
+                    diff = np.abs(frame.astype(np.float32) - previous_frame.astype(np.float32)).mean(axis=-1)
+                    if diff.mean() > _MOTION_DIFF_THRESHOLD:
+                        column_weight = diff.sum(axis=0)
+                        centroid_x = float(np.average(np.arange(frame_width), weights=column_weight))
+                        return centroid_x, frame_width, frames_read
+                previous_frame = frame
 
             await asyncio.sleep(_MOTION_SAMPLE_INTERVAL_S)
             elapsed += _MOTION_SAMPLE_INTERVAL_S
 
         return None, frame_width, frames_read
 
-    async def _turn_to_caught_player(
-        self, deps: ToolDependencies, shoulder_center: Tuple[int, int], frame_width: int
-    ) -> None:
+    async def _turn_to_caught_player(self, deps: ToolDependencies, caught_x: float, frame_width: int) -> None:
         """Turn the head to look at the pixel position of whoever just got caught moving."""
-        normalized_x = ((shoulder_center[0] / frame_width) - 0.5) * 2
+        normalized_x = ((caught_x / frame_width) - 0.5) * 2
         lo, hi = _CAUGHT_YAW_RANGE_DEG
         target_yaw_deg = normalized_x * (hi - lo) / 2 + (hi + lo) / 2
 
@@ -225,10 +213,3 @@ class RedLightGreenLight(Tool):
         deps.movement_manager.queue_move(move)
         deps.movement_manager.set_moving_state(_CAUGHT_TURN_DURATION_S)
         await asyncio.sleep(_CAUGHT_TURN_DURATION_S)
-
-    async def _get_detector(self) -> PeopleDetector:
-        """Lazily build the pose detector, downloading its model on first use."""
-        if self._detector is None:
-            model_path = await asyncio.to_thread(ensure_pose_model_downloaded)
-            self._detector = await asyncio.to_thread(PeopleDetector, model_path)
-        return self._detector

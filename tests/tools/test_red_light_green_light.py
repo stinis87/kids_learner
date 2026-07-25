@@ -1,6 +1,5 @@
 """Tests for the red_light_green_light tool."""
 
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -21,13 +20,6 @@ def _make_deps(camera_enabled: bool = True) -> ToolDependencies:
         movement_manager=MagicMock(),
         camera_enabled=camera_enabled,
     )
-
-
-def _patch_detector(landmarks_per_frame: list[list[list[tuple[int, int]]]]) -> Any:
-    """Patch tool detector construction so it returns one people-list per sampled frame."""
-    detector = MagicMock()
-    detector.detect.side_effect = landmarks_per_frame
-    return patch.object(RedLightGreenLight, "_get_detector", new=AsyncMock(return_value=detector))
 
 
 @pytest.mark.asyncio
@@ -67,16 +59,17 @@ async def test_green_light_can_trigger_a_fakeout() -> None:
 
 @pytest.mark.asyncio
 async def test_red_light_reports_caught_and_turns_to_the_mover() -> None:
-    """The red_light phase flags caught=True and turns toward whoever's landmarks shifted a lot."""
+    """The red_light phase flags caught=True and turns toward wherever the frame changed a lot."""
     deps = _make_deps()
-    still = [(10, 10), (20, 20)]
-    moved = [(200, 200), (220, 220)]
-    frames = [[still], [still], [still], [still], [moved]]
+    still_frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    moved_frame = still_frame.copy()
+    moved_frame[:, 3, :] = 255  # bright motion concentrated in the rightmost column
+    frames = [still_frame, still_frame, still_frame, still_frame, moved_frame]
+    deps.reachy_mini.media.get_frame.side_effect = frames
 
     with (
         patch("random.uniform", return_value=0.6),  # short scan window matching the 5 sampled frames
         patch("asyncio.sleep", new=AsyncMock()),
-        _patch_detector(frames),
     ):
         result = await RedLightGreenLight()(deps, phase="red_light")
 
@@ -87,15 +80,14 @@ async def test_red_light_reports_caught_and_turns_to_the_mover() -> None:
 
 @pytest.mark.asyncio
 async def test_red_light_reports_not_caught_when_nobody_moves() -> None:
-    """The red_light phase flags caught=False when a detected person barely moves."""
+    """The red_light phase flags caught=False when consecutive frames barely differ."""
     deps = _make_deps()
-    still = [(10, 10), (20, 20)]
-    frames = [[still]] * 5
+    still_frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    deps.reachy_mini.media.get_frame.side_effect = [still_frame] * 5
 
     with (
         patch("random.uniform", return_value=0.6),
         patch("asyncio.sleep", new=AsyncMock()),
-        _patch_detector(frames),
     ):
         result = await RedLightGreenLight()(deps, phase="red_light")
 
@@ -124,7 +116,6 @@ async def test_red_light_reports_error_when_no_frame_available() -> None:
     with (
         patch("random.uniform", return_value=0.3),
         patch("asyncio.sleep", new=AsyncMock()),
-        _patch_detector([]),
     ):
         result = await RedLightGreenLight()(deps, phase="red_light")
 
