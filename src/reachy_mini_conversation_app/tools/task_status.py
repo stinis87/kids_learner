@@ -21,7 +21,9 @@ class TaskStatus(Tool):
     name = "task_status"
     description = (
         "Check the status of background tool tasks. "
-        "Use this when the user asks about running tools or wants to know what's happening in the background."
+        "Use this when the user asks about running tools or wants to know what's happening in the background. "
+        "Works no matter what language the user asks in — e.g. Norwegian 'hva gjør du nå', "
+        "'er du ferdig' are the same request as their English equivalents."
     )
     parameters_schema = {
         "type": "object",

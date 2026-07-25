@@ -38,7 +38,11 @@ class Dance(Tool):
     """Play a named or random dance move once (or repeat). Non-blocking."""
 
     name = "dance"
-    description = "Play a named or random dance move once (or repeat). Non-blocking."
+    description = (
+        "Play a named or random dance move once (or repeat). Non-blocking. "
+        "Works no matter what language the user asks in — e.g. Norwegian 'dans for meg', "
+        "'kan du danse' are the same request as their English equivalents."
+    )
     needs_response = False
     parameters_schema = {
         "type": "object",

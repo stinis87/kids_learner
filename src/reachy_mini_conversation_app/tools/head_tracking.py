@@ -13,7 +13,9 @@ class HeadTracking(Tool):
     name = "head_tracking"
     description = (
         "Enable or disable following the user's face with the head. "
-        "Use when asked to follow, keep looking at, or stop following the user."
+        "Use when asked to follow, keep looking at, or stop following the user. "
+        "Works no matter what language the user asks in — e.g. Norwegian 'følg meg med hodet', "
+        "'slutt å følge meg' are the same request as their English equivalents."
     )
     needs_response = False
     parameters_schema = {

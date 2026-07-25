@@ -19,6 +19,9 @@ class Camera(Tool):
         "Also use it when the user asks what you can see or wants your visual opinion. "
         "The camera is live, each call captures the current moment. "
         "If the user asks you to look without saying at what, do not ask for clarification, call this tool and describe what you see. "
+        "This applies no matter what language the user asks in — e.g. Norwegian 'hva er dette', "
+        "'hva holder jeg', 'hva ser du' are the same request as their English equivalents and must "
+        "trigger this tool too, not just a spoken guess."
     )
     parameters_schema = {
         "type": "object",

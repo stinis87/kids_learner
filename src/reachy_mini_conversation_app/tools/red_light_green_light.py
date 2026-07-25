@@ -61,7 +61,9 @@ class RedLightGreenLight(Tool):
         "returns say 'Red light!' plus the verdict right away (call them out if caught=true, praise them "
         "if still). Call this tool again immediately to start the next round for as many rounds as the "
         "user wants. When the user asks to stop, call move_head with direction='front' to face them "
-        "again. Requires the camera; do not use if the camera is disabled."
+        "again. Requires the camera; do not use if the camera is disabled. Works no matter what language "
+        "the user asks in — e.g. Norwegian 'kan vi spille rødt lys, grønt lys' or 'stopp og gå' request "
+        "the same game as their English equivalent."
     )
     parameters_schema = {
         "type": "object",

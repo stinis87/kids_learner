@@ -14,7 +14,9 @@ class Forget(Tool):
     name = "forget"
     description = (
         "Remove a previously saved fact from long-term memory. Call this when the user asks you to forget something, "
-        "or when saved information becomes obsolete. Match by a specific free-text phrase present in the fact."
+        "or when saved information becomes obsolete. Match by a specific free-text phrase present in the fact. "
+        "Works no matter what language the user asks in — e.g. Norwegian 'glem det', 'du kan glemme at ...' "
+        "are the same request as their English equivalents."
     )
     parameters_schema = {
         "type": "object",

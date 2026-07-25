@@ -235,7 +235,11 @@ class PlayEmotion(Tool):
     """Play a pre-recorded emotion."""
 
     name = "play_emotion"
-    description = "Play a robot emotion matching a requested emotional intent."
+    description = (
+        "Play a robot emotion matching a requested emotional intent. "
+        "Works no matter what language the user asks in — e.g. Norwegian 'vis at du er glad', "
+        "'se lei deg ut' are the same request as their English equivalents."
+    )
     needs_response = False
     parameters_schema = {
         "type": "object",

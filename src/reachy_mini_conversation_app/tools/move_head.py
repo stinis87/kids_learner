@@ -15,7 +15,11 @@ class MoveHead(Tool):
     """Move head in a given direction."""
 
     name = "move_head"
-    description = "Move your head in a given direction: left, right, up, down or front."
+    description = (
+        "Move your head in a given direction: left, right, up, down or front. "
+        "Works no matter what language the user asks in — e.g. Norwegian 'se til venstre', "
+        "'se ned' are the same request as their English equivalents."
+    )
     needs_response = False
     parameters_schema = {
         "type": "object",

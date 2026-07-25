@@ -14,7 +14,9 @@ class GoToSleep(Tool):
     name = "go_to_sleep"
     description = (
         "Use when you are sure the user wants Reachy to go to sleep, stop the current app, shut down this app, "
-        "or end the conversation. Do not use for idle turns, sleepy emotions, silence, or ambiguous requests."
+        "or end the conversation. Do not use for idle turns, sleepy emotions, silence, or ambiguous requests. "
+        "Works no matter what language the user asks in — e.g. Norwegian 'gå og sov', 'legg deg', "
+        "'avslutt samtalen' are the same request as their English equivalents."
     )
     needs_response = False
     parameters_schema = {

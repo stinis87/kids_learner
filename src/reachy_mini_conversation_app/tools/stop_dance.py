@@ -11,7 +11,10 @@ class StopDance(Tool):
     """Stop the current dance move."""
 
     name = "stop_dance"
-    description = "Stop the current dance move"
+    description = (
+        "Stop the current dance move. Works no matter what language the user asks in — "
+        "e.g. Norwegian 'stopp dansen', 'slutt å danse' are the same request as their English equivalents."
+    )
     needs_response = False
     parameters_schema = {
         "type": "object",

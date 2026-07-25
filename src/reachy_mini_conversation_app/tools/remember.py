@@ -17,7 +17,9 @@ class Remember(Tool):
         "Use this for stable user information they explicitly shared: name, preferences, hobbies, recurring projects, "
         "important people, or plans. Keep each fact atomic and under one sentence. Do not save sensitive data "
         "(passwords, addresses, payment info, health diagnoses) or fleeting details. Use this silently in the "
-        'background; acknowledge naturally without saying "I will remember that".'
+        'background; acknowledge naturally without saying "I will remember that". This applies no matter what '
+        "language the user shared the fact in — a fact shared in Norwegian is just as worth remembering as one "
+        "shared in English."
     )
     parameters_schema = {
         "type": "object",

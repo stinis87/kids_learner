@@ -11,7 +11,10 @@ class StopEmotion(Tool):
     """Stop the current emotion."""
 
     name = "stop_emotion"
-    description = "Stop the current emotion"
+    description = (
+        "Stop the current emotion. Works no matter what language the user asks in — "
+        "e.g. Norwegian 'stopp det', 'slutt med det' are the same request as their English equivalents."
+    )
     needs_response = False
     parameters_schema = {
         "type": "object",
