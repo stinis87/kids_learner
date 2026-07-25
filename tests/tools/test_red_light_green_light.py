@@ -1,5 +1,6 @@
 """Tests for the red_light_green_light tool."""
 
+import math
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -42,6 +43,10 @@ async def test_round_hides_waits_and_reports_not_caught_when_nobody_moves() -> N
     assert result["caught"] is False
     # One move to hide, one move to snap back up; nobody to turn toward.
     assert deps.movement_manager.queue_move.call_count == 2
+    hide_move, reveal_move = deps.movement_manager.queue_move.call_args_list
+    # Spins away from the user to hide, then all the way back to face them again.
+    assert hide_move.args[0].target_body_yaw == pytest.approx(math.radians(175.0))
+    assert reveal_move.args[0].target_body_yaw == 0
 
 
 @pytest.mark.asyncio

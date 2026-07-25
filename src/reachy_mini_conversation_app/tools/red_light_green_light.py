@@ -1,3 +1,4 @@
+import math
 import random
 import asyncio
 import logging
@@ -16,9 +17,11 @@ logger = logging.getLogger(__name__)
 # Timings and thresholds mirror the "expert mode" of this game
 # (ChristmasTree/expert-red-light-green-light): quick head-hide/reveal snaps, antennas
 # that act alert or coy, occasional fake-out green lights, and a long, randomized watch
-# window rather than a fixed one, so the pacing itself keeps players honest.
-_HIDE_DURATION_S = 0.08
-_REVEAL_DURATION_S = 0.08
+# window rather than a fixed one, so the pacing itself keeps players honest. On top of
+# that we add a full body turn: Reachy spins its back to the user on green light and
+# spins back to face them the instant it's red light, like the real playground game.
+_HIDE_DURATION_S = 0.5  # time to spin away and tuck the head down
+_REVEAL_DURATION_S = 0.35  # time to spin back and snap the head up, quicker than hiding
 _RED_SETTLE_S = 0.3  # pause after snapping up before scanning, to let motion blur clear
 _GREEN_LIGHT_MIN_S = 0.8
 _GREEN_LIGHT_MAX_S = 2.4
@@ -31,6 +34,9 @@ _MOTION_SAMPLE_INTERVAL_S = 0.12
 _MOTION_DIFF_THRESHOLD = 8.0
 _CAUGHT_TURN_DURATION_S = 0.3
 _CAUGHT_YAW_RANGE_DEG = (-80.0, 80.0)
+# How far Reachy spins its body away from the user on green light, in degrees. Kept just
+# under 180 to stay clear of the body yaw's hard end-stop.
+_BODY_TURN_AWAY_DEG = 175.0
 
 # Antenna poses double as Reachy's facial expression here: relaxed while hiding its
 # eyes, perked up and alert while watching, cocked sideways when calling someone out.
@@ -47,14 +53,15 @@ class RedLightGreenLight(Tool):
         "Play one full round of Red Light, Green Light per call — this single call covers both the "
         "green light and red light phases, so never split a round across two calls and never wait for "
         "the user to say anything in between. Say 'Green light!' out loud AS you call this tool. Reachy "
-        "then tucks its head down to hide its eyes (they may move now) for a short randomized moment, "
-        "occasionally a lightning-fast fake-out, before snapping back up on its own to watch the camera "
-        "for several seconds and turning to look right at anyone it catches moving. The call does not "
-        "return until all of that has finished, so as soon as it returns say 'Red light!' plus the "
-        "verdict right away (call them out if caught=true, praise them if still). Call this tool again "
-        "immediately to start the next round for as many rounds as the user wants. When the user asks "
-        "to stop, call move_head with direction='front' to face them again. Requires the camera; do not "
-        "use if the camera is disabled."
+        "then spins its body 180 degrees to turn its back on the user and tucks its head down to hide "
+        "its eyes (they may move now) for a short randomized moment, occasionally a lightning-fast "
+        "fake-out, before quickly spinning back around on its own to face the user, snapping its head "
+        "back up, and watching the camera for several seconds — turning to look right at anyone it "
+        "catches moving. The call does not return until all of that has finished, so as soon as it "
+        "returns say 'Red light!' plus the verdict right away (call them out if caught=true, praise them "
+        "if still). Call this tool again immediately to start the next round for as many rounds as the "
+        "user wants. When the user asks to stop, call move_head with direction='front' to face them "
+        "again. Requires the camera; do not use if the camera is disabled."
     )
     parameters_schema = {
         "type": "object",
@@ -77,7 +84,7 @@ class RedLightGreenLight(Tool):
             return {"error": f"red_light_green_light failed: {type(e).__name__}: {e}"}
 
     async def _hide_and_wait(self, deps: ToolDependencies) -> Dict[str, Any]:
-        """Tuck the head down to hide its eyes, then wait a randomized short moment."""
+        """Spin the body away from the user and tuck the head down, then wait a randomized moment."""
         deps.movement_manager.clear_move_queue()
 
         current_head_pose = deps.reachy_mini.get_current_head_pose()
@@ -89,7 +96,7 @@ class RedLightGreenLight(Tool):
             start_head_pose=current_head_pose,
             target_antennas=_ANTENNAS_HIDDEN,
             start_antennas=(current_antennas[0], current_antennas[1]),
-            target_body_yaw=0,
+            target_body_yaw=math.radians(_BODY_TURN_AWAY_DEG),
             start_body_yaw=current_body_yaw,
             duration=_HIDE_DURATION_S,
         )
@@ -109,7 +116,7 @@ class RedLightGreenLight(Tool):
         }
 
     async def _watch_for_movement(self, deps: ToolDependencies) -> Dict[str, Any]:
-        """Snap the head back up, watch for movement, and turn to look at whoever gets caught."""
+        """Spin back to face the user, snap the head up, watch for movement, and turn to look at whoever gets caught."""
         deps.movement_manager.clear_move_queue()
 
         current_head_pose = deps.reachy_mini.get_current_head_pose()
