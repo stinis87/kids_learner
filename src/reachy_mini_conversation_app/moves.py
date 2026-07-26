@@ -128,6 +128,11 @@ def clone_full_body_pose(pose: FullBodyPose) -> FullBodyPose:
     return (head.copy(), (float(antennas[0]), float(antennas[1])), float(body_yaw))
 
 
+def _wrap_to_pi(angle_rad: float) -> float:
+    """Wrap an angle in radians to the (-pi, pi] range."""
+    return float((angle_rad + np.pi) % (2 * np.pi) - np.pi)
+
+
 @dataclass
 class MovementState:
     """State tracking for the movement system."""
@@ -227,6 +232,22 @@ class MovementManager:
         self._set_target_err_interval = 1.0  # seconds between error logs
         self._set_target_err_suppressed = 0
 
+        # DoA-assisted speaker tracking (best-effort, only active while head tracking is on)
+        self._speaker_tracking_enabled = False
+        self._speaker_yaw_target = 0.0
+        self._speaker_yaw_current = 0.0
+        self._last_doa_poll_time = self._now()
+        self._doa_poll_interval_s = 0.5
+        self._speaker_yaw_blend_duration_s = 0.6
+        self._last_speaker_yaw_blend_time = self._now()
+        # A locked face only defers to DoA once a different speech direction persists
+        # this long, so a brand-new speaker (possibly out of frame) reclaims attention
+        # instead of the robot staying stuck on whoever it locked onto first.
+        self._speaker_redirect_threshold_rad = np.radians(25.0)
+        self._speaker_redirect_confirm_s = 1.5
+        self._pending_speaker_yaw_target: float | None = None
+        self._pending_speaker_since = self._now()
+
         # Cross-thread signalling
         self._command_queue: "Queue[Tuple[str, Any]]" = Queue()
 
@@ -289,6 +310,16 @@ class MovementManager:
     def set_head_tracking(self, enabled: bool) -> None:
         """Start or stop following the user's face; thread-safe via the command queue."""
         self._command_queue.put(("set_head_tracking", enabled))
+
+    def set_speaker_tracking(self, enabled: bool) -> None:
+        """Enable or disable turning the body toward whoever is speaking (DoA-assisted).
+
+        Best-effort: this only nudges body yaw toward the mic array's Direction-of-
+        Arrival while no face is currently locked by head tracking, to help it
+        (re)acquire the actual speaker. It is a no-op if the ReSpeaker mic array
+        isn't available. Thread-safe via the command queue.
+        """
+        self._command_queue.put(("set_speaker_tracking", enabled))
 
     def set_speaking(self, speaking: bool) -> None:
         """Pause head tracking while the assistant speaks, resume it afterwards.
@@ -382,6 +413,13 @@ class MovementManager:
                     self.current_robot.stop_head_tracking()
             except Exception as e:
                 logger.warning("Head-tracking toggle failed: %s", e)
+        elif command == "set_speaker_tracking":
+            enabled = bool(payload)
+            self._speaker_tracking_enabled = enabled
+            if not enabled:
+                self._speaker_yaw_target = 0.0
+                self._speaker_yaw_current = 0.0
+                self._pending_speaker_yaw_target = None
         elif command == "set_speaking":
             if not self._head_tracking:
                 return
@@ -506,10 +544,92 @@ class MovementManager:
 
         return primary_full_body_pose
 
+    def _manage_speaker_tracking(self, current_time: float) -> None:
+        """Nudge body yaw toward the active speaker's direction via mic-array DoA.
+
+        While no face is locked, DoA fully drives the yaw target. Once a face is
+        locked, the daemon's visual tracker normally owns the head — but if DoA
+        keeps reporting speech from a meaningfully different direction for
+        `_speaker_redirect_confirm_s`, we treat that as a new speaker (e.g. someone
+        behind the robot) and redirect toward them instead of staying stuck on
+        whoever was locked first. Best-effort: silently does nothing if the
+        ReSpeaker mic array isn't available.
+        """
+        if not self._speaker_tracking_enabled or not self._head_tracking:
+            return
+
+        if current_time - self._last_doa_poll_time < self._doa_poll_interval_s:
+            return
+        self._last_doa_poll_time = current_time
+
+        try:
+            face_locked = self.current_robot.get_tracked_face(wait=False).detected
+        except Exception as e:
+            logger.debug("Speaker tracking: could not read tracked face (%s)", e)
+            return
+
+        try:
+            doa_reading = self.current_robot.media.get_DoA()
+        except Exception as e:
+            logger.debug("Speaker tracking: DoA read failed (%s)", e)
+            return
+        if doa_reading is None:
+            return
+
+        angle_rad, speech_detected = doa_reading
+        if not speech_detected:
+            self._pending_speaker_yaw_target = None
+            return
+
+        # DoA angle: 0 rad = left, pi/2 = front, pi = right (mic-array-relative).
+        # Recentre it on "front" as a body-yaw target; sign/scale is best-effort and
+        # may need calibration per unit.
+        candidate_yaw = (np.pi / 2) - float(angle_rad)
+
+        if not face_locked:
+            self._speaker_yaw_target = candidate_yaw
+            self._pending_speaker_yaw_target = None
+            return
+
+        # A face is locked: only redirect once a persistently different speech
+        # direction confirms a new speaker, so brief echoes/reflections don't
+        # yank attention away from the person actually being looked at.
+        angular_diff = abs(_wrap_to_pi(candidate_yaw - self._speaker_yaw_current))
+        if angular_diff < self._speaker_redirect_threshold_rad:
+            self._speaker_yaw_target = self._speaker_yaw_current
+            self._pending_speaker_yaw_target = None
+            return
+
+        if (
+            self._pending_speaker_yaw_target is None
+            or abs(_wrap_to_pi(candidate_yaw - self._pending_speaker_yaw_target))
+            > self._speaker_redirect_threshold_rad
+        ):
+            self._pending_speaker_yaw_target = candidate_yaw
+            self._pending_speaker_since = current_time
+            return
+
+        if current_time - self._pending_speaker_since >= self._speaker_redirect_confirm_s:
+            self._speaker_yaw_target = candidate_yaw
+            self._pending_speaker_yaw_target = None
+
+    def _blend_speaker_yaw(self, current_time: float, body_yaw: float) -> float:
+        """Smoothly steer body yaw toward the DoA target while speaker tracking is active."""
+        if not self._speaker_tracking_enabled:
+            return body_yaw
+
+        dt = max(0.0, current_time - self._last_speaker_yaw_blend_time)
+        self._last_speaker_yaw_blend_time = current_time
+        blend_duration = self._speaker_yaw_blend_duration_s
+        step = 1.0 if blend_duration <= 0 else min(1.0, dt / blend_duration)
+        self._speaker_yaw_current += (self._speaker_yaw_target - self._speaker_yaw_current) * step
+        return body_yaw + self._speaker_yaw_current
+
     def _update_primary_motion(self, current_time: float) -> None:
         """Advance queue state and idle behaviours for this tick."""
         self._manage_move_queue(current_time)
         self._manage_breathing(current_time)
+        self._manage_speaker_tracking(current_time)
 
     def _calculate_blended_antennas(self, target_antennas: Tuple[float, float]) -> Tuple[float, float]:
         """Blend target antennas with listening freeze state and update blending."""
@@ -744,6 +864,9 @@ class MovementManager:
 
             # 3) Build the primary full-body pose for this tick
             head, antennas, body_yaw = self._get_primary_pose(loop_start)
+
+            # 3b) Blend in a DoA-driven body-yaw nudge toward the active speaker, if enabled
+            body_yaw = self._blend_speaker_yaw(loop_start, body_yaw)
 
             # 4) Apply listening antenna freeze or blend-back
             antennas_cmd = self._calculate_blended_antennas(antennas)

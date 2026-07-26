@@ -182,6 +182,7 @@ def run(
         )
 
     handler = build_handler(startup_settings.voice)
+    deps.apply_personality = handler.apply_personality
 
     stream_manager: LocalStream | None = None
     own_ui_server = None

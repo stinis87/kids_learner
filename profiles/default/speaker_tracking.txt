@@ -1,0 +1,4 @@
+# Presence of this file enables DoA-assisted speaker-facing (see moves.py's
+# MovementManager.set_speaker_tracking) for this profile: while head tracking is
+# on and no face is currently locked, Reachy nudges its body toward whoever the
+# mic array detects as actively speaking, then hands back off to face tracking.

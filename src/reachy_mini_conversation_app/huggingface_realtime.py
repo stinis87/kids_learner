@@ -42,6 +42,8 @@ from reachy_mini_conversation_app.prompts import (
     get_session_greeting_prompt,
 )
 from reachy_mini_conversation_app.streaming import AdditionalOutputs, audio_to_int16
+from reachy_mini_conversation_app.proactive_vision import ProactiveVisionEngine
+from reachy_mini_conversation_app.proactive_vision import load_config as load_proactive_vision_config
 from reachy_mini_conversation_app.tools.core_tools import (
     ToolSpec,
     ToolDependencies,
@@ -158,6 +160,8 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         self._startup_greeting_sent = False
         self._in_flight_tool_calls: set[str] = set()
         self._tool_batch_needs_response = False
+
+        self._proactive_vision: ProactiveVisionEngine | None = None
 
     @staticmethod
     def _sanitize_tool_result_for_model(tool_name: str, tool_result: dict[str, Any]) -> dict[str, Any]:
@@ -444,6 +448,77 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         This method never blocks the caller.
         """
         await self._pending_responses.put(kwargs)
+
+    async def _setup_proactive_vision(self) -> None:
+        """Start or stop the proactive vision loop to match the active profile."""
+        profile = getattr(config, "REACHY_MINI_CUSTOM_PROFILE", None) or "default"
+        try:
+            profile_dir = config.resolve_profile_dir(profile)
+            vision_config = load_proactive_vision_config(profile_dir)
+        except Exception as e:
+            logger.warning("Failed to load proactive vision config for profile %r: %s", profile, e)
+            vision_config = None
+
+        if self._proactive_vision is not None:
+            await self._proactive_vision.stop()
+            self._proactive_vision = None
+
+        if vision_config is None:
+            return
+
+        self._proactive_vision = ProactiveVisionEngine(
+            vision_config,
+            get_frame_jpeg=self._proactive_vision_frame,
+            is_ready=lambda: self.connection is not None and self._response_done_event.is_set(),
+            seconds_since_activity=lambda: time.monotonic() - self.last_activity_time,
+            send_prompt=self._send_proactive_vision_prompt,
+        )
+        self._proactive_vision.start()
+        logger.info("Proactive vision enabled for profile %r: %s", profile, vision_config)
+
+    def _setup_speaker_tracking(self) -> None:
+        """Enable DoA-assisted speaker-facing only for profiles that opt in via a marker file."""
+        profile = getattr(config, "REACHY_MINI_CUSTOM_PROFILE", None) or "default"
+        try:
+            marker_file = config.resolve_profile_dir(profile) / "speaker_tracking.txt"
+            enabled = marker_file.exists()
+        except Exception as e:
+            logger.warning("Failed to resolve speaker tracking marker for profile %r: %s", profile, e)
+            enabled = False
+        self.deps.movement_manager.set_speaker_tracking(enabled)
+        logger.info("Speaker tracking %s for profile %r", "enabled" if enabled else "disabled", profile)
+
+    def _proactive_vision_frame(self) -> bytes | None:
+        """Grab a raw camera frame for the proactive vision loop, if the camera is on."""
+        if not self.deps.camera_enabled:
+            return None
+        try:
+            frame: bytes | None = self.deps.reachy_mini.media.get_frame_jpeg()
+            return frame
+        except Exception as e:
+            logger.warning("Proactive vision could not read a camera frame: %s", e)
+            return None
+
+    async def _send_proactive_vision_prompt(self, b64_image: str, nudge_text: str) -> None:
+        """Inject a fresh camera frame plus a short nudge, then prompt for a spoken reaction."""
+        if not self.connection:
+            return
+        try:
+            await self.connection.conversation.item.create(
+                item={
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64_image}"},
+                        {"type": "input_text", "text": nudge_text},
+                    ],
+                },
+            )
+            self._mark_activity("proactive_vision_prompt")
+            await self._safe_response_create()
+            logger.info("Queued proactive vision prompt")
+        except Exception as e:
+            logger.warning("Failed to queue proactive vision prompt: %s", e)
 
     async def _send_startup_greeting_prompt(self) -> None:
         """Prompt the model to open the conversation once the session is ready."""
@@ -732,6 +807,8 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                 # Start the response sender worker
                 response_sender_task = asyncio.create_task(self._response_sender_loop(), name="response-sender")
                 await self._send_startup_greeting_prompt()
+                await self._setup_proactive_vision()
+                self._setup_speaker_tracking()
 
                 async for event in self.connection:
                     logger.debug("Realtime event: %s", event.type)
@@ -990,6 +1067,10 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         """Shutdown the handler."""
         # Unblock the response sender worker so it can exit
         self._response_done_event.set()
+
+        if self._proactive_vision is not None:
+            await self._proactive_vision.stop()
+            self._proactive_vision = None
 
         # Stop background tool manager tasks (listener + cleanup)
         await self.tool_manager.shutdown()

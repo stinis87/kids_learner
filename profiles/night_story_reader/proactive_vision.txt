@@ -1,0 +1,7 @@
+# Enables the proactive vision engine (see proactive_vision.py) for this profile.
+# Reachy samples the camera every `sample_interval_seconds` and speaks up about
+# what it sees when either the page/scene visibly changes, or after
+# `quiet_pause_seconds` of silence — whichever happens first.
+sample_interval_seconds=3
+quiet_pause_seconds=7
+speak_cooldown_seconds=10

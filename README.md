@@ -206,6 +206,7 @@ The default profile exposes these tools. Custom profiles can enable a different 
 | `pollen_robotics_reachy_mini_search_tool__search_web` | Search the web and return a short list of results. | Preinstalled MCP Space: `pollen-robotics/reachy-mini-search-tool`. |
 | `pollen_robotics_reachy_mini_weather_tool__get_weather` | Report today's weather for a place: current conditions, high and low temperature, and rain chance. | Preinstalled MCP Space: `pollen-robotics/reachy-mini-weather-tool`. |
 | `pollen_robotics_reachy_mini_time_tool__get_time` | Report the current time for a timezone or the user's local time, or the difference between two timezones. | Preinstalled MCP Space: `pollen-robotics/reachy-mini-time-tool`. |
+| `switch_profile` | Switch Reachy's active personality profile by voice (e.g. "let's read a bedtime story", "go back to normal"). | Core install only. Restarts the realtime session, same as switching profiles from the UI. |
 
 > [!NOTE]
 > `remember`/`forget` facts are stored in `memory.v1.json` inside the app's instance data directory (`~/.local/share/reachy_mini_conversation_app/` by default, or the instance path used by the desktop launcher). `forget` only removes facts matched by query. To reset all remembered facts, delete this file.
@@ -271,6 +272,33 @@ When running with `--ui`, the Home view lists available profiles (folders under 
 - Tap "Custom" to create a new personality by entering a name, instructions, and an optional startup greeting prompt. It copies `tools.txt` from the `default` profile and stores the files under `user_personalities/<name>/` in the app instance directory (next to `.env`/`startup_settings.json`).
 
 Note: switching a personality reloads its instructions and tools in place via a quick backend reconnect — no app restart. Editing the active profile's files on disk needs a re-select (or restart) to apply.
+
+**Switching profiles by voice:**
+
+Every profile enables the `switch_profile` tool, so the assistant can change personality mid-conversation when the user asks for a different companion (e.g. "let's read a bedtime story", "switch to night story reader", "go back to normal") — no need to touch the UI. It reuses the same apply-personality path as the UI, including the brief session restart.
+
+</details>
+
+<details>
+<summary><b>Night story reader profile</b></summary>
+
+`profiles/night_story_reader/` is a bedtime-story companion: it watches the picture book continuously and speaks up on its own — commenting on the page or asking an engaging question — instead of waiting to be asked "what do you see". This is driven by the **proactive vision engine** (`src/reachy_mini_conversation_app/proactive_vision.py`), which samples the camera every few seconds but only prompts the model for a spoken reaction when either the page/scene visibly changed or a short quiet pause has elapsed, whichever comes first — so it feels attentive without narrating non-stop.
+
+Any profile can opt into this behavior by adding a `proactive_vision.txt` marker file to its profile folder, with optional overrides:
+```
+sample_interval_seconds=3
+quiet_pause_seconds=7
+speak_cooldown_seconds=10
+```
+
+</details>
+
+<details>
+<summary><b>Speaker-facing (mic array + face tracking)</b></summary>
+
+The `default` profile additionally turns toward whoever is actually speaking by combining the ReSpeaker mic array's Direction-of-Arrival (DoA) with the existing camera-based face tracking (`head_tracking` tool): while head tracking is on and no face is currently locked, Reachy nudges its body yaw toward the detected speech direction, then hands back off to face tracking once it acquires a face there. If a different person then starts speaking from a meaningfully different direction (e.g. someone behind the robot) and that keeps up for about 1.5 seconds, Reachy redirects toward them instead of staying stuck on whoever it locked onto first — brief noises or echoes from another direction aren't enough to yank attention away. This requires ReSpeaker firmware >= 2.1.0; it degrades gracefully (no-op) on units without the mic array.
+
+Enable this for a profile by adding an (empty) `speaker_tracking.txt` marker file to its profile folder — it's on by default for `profiles/default/` and intentionally left off for `night_story_reader` so the robot stays focused on the book instead of turning toward background noise.
 
 </details>
 
