@@ -19,13 +19,13 @@ from reachy_mini_conversation_app.config import DEFAULT_PROFILES_DIRECTORY as DE
 # Import config to ensure .env is loaded before reading REACHY_MINI_CUSTOM_PROFILE
 from reachy_mini_conversation_app.config import config
 from reachy_mini_conversation_app.mcp_client import McpToolTimeoutError, McpToolInvocationError
+from reachy_mini_conversation_app.ring_client import RingClient
 from reachy_mini_conversation_app.tool_spaces import build_remote_client, read_installed_tool_spaces
 from reachy_mini_conversation_app.tools.tool_constants import SystemTool
 
 
 if TYPE_CHECKING:
     from reachy_mini_conversation_app.mcp_client import RemoteMcpToolClient
-    from reachy_mini_conversation_app.ring_client import RingClient
     from reachy_mini_conversation_app.tools.background_tool_manager import BackgroundToolManager
 
 
