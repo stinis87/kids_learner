@@ -14,9 +14,9 @@ from reachy_mini_conversation_app.ring_watcher import (
 )
 
 
-def test_load_config_returns_none_when_profile_does_not_opt_in(tmp_path: Path) -> None:
-    """Profiles without a marker file should not enable the Ring watcher."""
-    assert load_config(tmp_path) is None
+def test_load_config_enabled_by_default_without_marker_file(tmp_path: Path) -> None:
+    """Profiles without a marker file still get the Ring watcher, using defaults."""
+    assert load_config(tmp_path) == RingWatcherConfig()
 
 
 def test_load_config_reads_custom_timings(tmp_path: Path) -> None:
@@ -40,6 +40,13 @@ def test_load_config_falls_back_to_defaults_for_missing_keys(tmp_path: Path) -> 
     assert result is not None
     assert result.poll_interval_seconds == 15
     assert result.device_cooldown_seconds == RingWatcherConfig().device_cooldown_seconds
+
+
+def test_load_config_returns_none_when_explicitly_disabled(tmp_path: Path) -> None:
+    """A profile can opt out entirely with `enabled=false`."""
+    (tmp_path / "ring_watcher.txt").write_text("enabled=false\n", encoding="utf-8")
+
+    assert load_config(tmp_path) is None
 
 
 def _event(device_name: str, event_id: int, kind: str = "motion") -> RingEvent:

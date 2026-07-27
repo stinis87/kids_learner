@@ -1,11 +1,13 @@
 """Ring event watcher: notice motion/doorbell events and speak up on its own.
 
-Used by profiles that opt in via a ``ring_watcher.txt`` marker file in their
-profile directory (see :func:`load_config`). Polls each Ring device's event
-history on an interval and, when a genuinely new motion or doorbell event
-appears, fetches a fresh snapshot and prompts the model to react — the same
-"inject an image, let the model respond freely" pattern used by
-:class:`reachy_mini_conversation_app.proactive_vision.ProactiveVisionEngine`.
+Enabled by default for every profile whenever Ring is configured (the Ring
+account is a single shared credential, not per-personality data). A profile
+can tune the timing, or opt out entirely, via an optional ``ring_watcher.txt``
+file in its profile directory (see :func:`load_config`). Polls each Ring
+device's event history on an interval and, when a genuinely new motion or
+doorbell event appears, fetches a fresh snapshot and prompts the model to
+react — the same "inject an image, let the model respond freely" pattern used
+by :class:`reachy_mini_conversation_app.proactive_vision.ProactiveVisionEngine`.
 """
 
 from __future__ import annotations
@@ -56,11 +58,12 @@ class RingWatcherConfig:
 
 
 def load_config(profile_dir: Path) -> RingWatcherConfig | None:
-    """Return the profile's Ring watcher config, or None when it opts out."""
+    """Return the profile's Ring watcher config; enabled by default, None when opted out."""
     config_file = profile_dir / CONFIG_FILENAME
     if not config_file.exists():
-        return None
+        return RingWatcherConfig()
 
+    enabled = True
     values: dict[str, float] = {}
     try:
         for line in config_file.read_text(encoding="utf-8").splitlines():
@@ -68,13 +71,21 @@ def load_config(profile_dir: Path) -> RingWatcherConfig | None:
             if not stripped or stripped.startswith("#") or "=" not in stripped:
                 continue
             key, _, raw_value = stripped.partition("=")
+            key = key.strip()
+            raw_value = raw_value.strip()
+            if key == "enabled":
+                enabled = raw_value.lower() not in ("false", "0", "no")
+                continue
             try:
-                values[key.strip()] = float(raw_value.strip())
+                values[key] = float(raw_value)
             except ValueError:
                 logger.warning("Ignoring malformed %s line: %r", CONFIG_FILENAME, line)
     except Exception as e:
         logger.warning("Failed to read %s: %s", config_file, e)
         return RingWatcherConfig()
+
+    if not enabled:
+        return None
 
     defaults = RingWatcherConfig()
     return RingWatcherConfig(
