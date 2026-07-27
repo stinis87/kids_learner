@@ -176,7 +176,7 @@ def run(
         movement_manager=movement_manager,
         instance_path=instance_path,
         camera_enabled=not args.no_camera,
-        ring_client=RingClient(instance_path=instance_path),
+        ring_client=RingClient(),
     )
 
     def build_handler(startup_voice: Optional[str] = None) -> ConversationHandler:

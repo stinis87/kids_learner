@@ -256,7 +256,7 @@ reachy-mini-conversation-app --ring-check
 
 This lists your Ring devices, fetches one snapshot from each, and saves them as `ring_images/ring_snapshot_<device>.jpg` (gitignored) so you can open them and confirm the image actually shows the right camera feed.
 
-Override where the cached token is stored with `RING_TOKEN_CACHE_PATH` (defaults next to the app's other instance data). Re-run `--ring-login` if the cached token expires.
+The token is a single Ring account credential shared by the whole app (not per-instance data), stored by default under your user data directory (`~/.local/share/reachy_mini_conversation_app/` on Linux/macOS). Override the location with `RING_TOKEN_CACHE_PATH`. Re-run `--ring-login` if the cached token expires.
 
 > [!NOTE]
 > The cached token file grants access to your Ring account, so it's written with owner-only permissions (`0600`) and, like `.env`, must never be committed or shared. During normal conversation, `check_ring_camera` sends each snapshot straight to the configured realtime backend (e.g. Hugging Face) for image analysis without ever writing it to disk — the same way the built-in `camera` tool already sends webcam frames. `--ring-check` is the only place snapshots are saved locally (into `ring_images/`, already gitignored), purely so you can visually confirm the feed is correct; delete that folder once you're done.
