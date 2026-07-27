@@ -11,6 +11,8 @@ import time
 import asyncio
 import logging
 from pathlib import Path
+from datetime import datetime
+from dataclasses import dataclass
 
 from ring_doorbell import Auth, Ring, RingError, AuthenticationError
 from ring_doorbell.doorbot import RingDoorBell
@@ -52,6 +54,22 @@ class RingNotConfiguredError(Exception):
 
 class RingDeviceNotFoundError(Exception):
     """Raised when no Ring device matches the requested location."""
+
+
+@dataclass(frozen=True)
+class RingEvent:
+    """A single motion/ding/on_demand entry from a Ring device's event history."""
+
+    device_name: str
+    event_id: int
+    kind: str
+    created_at: datetime
+
+
+# How many recent history entries to scan per device when looking for the latest
+# event of a given kind — Ring's history is newest-first, so this only needs to be
+# large enough to skip past a few unrelated kinds (e.g. on_demand) between events.
+_HISTORY_LOOKBACK = 10
 
 
 def token_cache_path(instance_path: str | Path | None = None) -> Path:
@@ -166,6 +184,37 @@ class RingClient:
             raise RingDeviceNotFoundError(f"No Ring device named '{location}'. Known devices: {known_names}")
 
         return await _get_snapshot_with_retry(ring, matching_device)
+
+    async def async_get_latest_events(self, kinds: tuple[str, ...]) -> dict[str, RingEvent]:
+        """Return each device's most recent history entry whose kind is in `kinds`.
+
+        Devices with no matching history are omitted from the result. A device
+        that fails to return history (e.g. a transient Ring API error) is
+        skipped rather than failing the whole call, so one flaky camera can't
+        block checking the others.
+        """
+        ring = await self._get_ring()
+        await ring.async_update_devices()
+
+        events: dict[str, RingEvent] = {}
+        for device in ring.video_devices():
+            try:
+                history = await device.async_history(limit=_HISTORY_LOOKBACK)
+            except (RingError, RuntimeError) as e:
+                logger.warning("Failed to fetch Ring history for '%s': %s", device.name, e)
+                continue
+
+            latest = next((entry for entry in history if entry.get("kind") in kinds), None)
+            if latest is None:
+                continue
+
+            events[device.name] = RingEvent(
+                device_name=device.name,
+                event_id=latest["id"],
+                kind=latest["kind"],
+                created_at=latest["created_at"],
+            )
+        return events
 
     async def async_list_locations(self) -> list[str]:
         """Return the friendly names of all doorbell/camera devices on the account."""

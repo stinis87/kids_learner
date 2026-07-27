@@ -1,0 +1,7 @@
+# Enables the Ring event watcher (see ring_watcher.py) for this profile.
+# Reachy polls each configured Ring device's event history every
+# `poll_interval_seconds` and reacts — fetching a snapshot and speaking up —
+# when a new motion or doorbell event appears, but at most once per device
+# every `device_cooldown_seconds` to avoid nagging about repeated motion.
+poll_interval_seconds=20
+device_cooldown_seconds=120

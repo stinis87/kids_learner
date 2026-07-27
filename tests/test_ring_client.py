@@ -1,5 +1,6 @@
 """Tests for the Ring client's location alias resolution and device lookup."""
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -9,11 +10,20 @@ from reachy_mini_conversation_app import ring_client as ring_client_module
 from reachy_mini_conversation_app.ring_client import RingClient, RingDeviceNotFoundError
 
 
-def _fake_device(name: str, device_id: int = 123) -> MagicMock:
+def _fake_device(name: str, device_id: int = 123, history: list[dict[str, object]] | None = None) -> MagicMock:
     device = MagicMock()
     device.name = name
     device.id = device_id
+    device.async_history = AsyncMock(return_value=history or [])
     return device
+
+
+def _history_entry(event_id: int, kind: str, created_at: datetime | None = None) -> dict[str, object]:
+    return {
+        "id": event_id,
+        "kind": kind,
+        "created_at": created_at or datetime(2024, 1, 1, tzinfo=timezone.utc),
+    }
 
 
 def _fake_response(content: bytes) -> MagicMock:
@@ -104,3 +114,60 @@ async def test_snapshot_gives_up_after_exhausting_retries(monkeypatch: pytest.Mo
         await client.async_get_device_snapshot("garden")
 
     assert client._get_ring.return_value.async_query.await_count == ring_client_module._SNAPSHOT_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_latest_events_returns_most_recent_matching_kind_per_device() -> None:
+    """Each device's newest history entry matching the requested kinds is returned."""
+    garden = _fake_device(
+        "Garden",
+        history=[_history_entry(2, "motion"), _history_entry(1, "on_demand")],
+    )
+    front_door = _fake_device(
+        "Front Door",
+        history=[_history_entry(5, "ding"), _history_entry(4, "motion")],
+    )
+    client = _client_with_devices([garden, front_door])
+
+    events = await client.async_get_latest_events(("motion", "ding"))
+
+    assert events["Garden"].event_id == 2
+    assert events["Garden"].kind == "motion"
+    assert events["Front Door"].event_id == 5
+    assert events["Front Door"].kind == "ding"
+
+
+@pytest.mark.asyncio
+async def test_latest_events_skips_unmatched_kinds() -> None:
+    """A device whose most recent entries are all outside the requested kinds is omitted."""
+    bod = _fake_device("Bod", history=[_history_entry(9, "on_demand")])
+    client = _client_with_devices([bod])
+
+    events = await client.async_get_latest_events(("motion", "ding"))
+
+    assert "Bod" not in events
+
+
+@pytest.mark.asyncio
+async def test_latest_events_omits_device_with_no_history() -> None:
+    """A device with an empty history simply doesn't appear in the result."""
+    bod = _fake_device("Bod", history=[])
+    client = _client_with_devices([bod])
+
+    events = await client.async_get_latest_events(("motion", "ding"))
+
+    assert events == {}
+
+
+@pytest.mark.asyncio
+async def test_latest_events_skips_device_on_history_error() -> None:
+    """One device's history fetch failing doesn't prevent checking the others."""
+    broken = _fake_device("Garden")
+    broken.async_history = AsyncMock(side_effect=RingError("boom"))
+    healthy = _fake_device("Front Door", history=[_history_entry(3, "ding")])
+    client = _client_with_devices([broken, healthy])
+
+    events = await client.async_get_latest_events(("motion", "ding"))
+
+    assert "Garden" not in events
+    assert events["Front Door"].event_id == 3

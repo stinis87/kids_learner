@@ -42,12 +42,15 @@ from reachy_mini_conversation_app.prompts import (
     get_session_greeting_prompt,
 )
 from reachy_mini_conversation_app.streaming import AdditionalOutputs, audio_to_int16
+from reachy_mini_conversation_app.ring_watcher import RingWatcherEngine
+from reachy_mini_conversation_app.ring_watcher import load_config as load_ring_watcher_config
 from reachy_mini_conversation_app.proactive_vision import ProactiveVisionEngine
 from reachy_mini_conversation_app.proactive_vision import load_config as load_proactive_vision_config
 from reachy_mini_conversation_app.tools.core_tools import (
     ToolSpec,
     ToolDependencies,
     get_tool_specs,
+    dispatch_tool_call,
 )
 from reachy_mini_conversation_app.audio.voice_effect import VoiceEffectState, apply_kid_robot_voice_effect
 from reachy_mini_conversation_app.conversation_handler import ConversationHandler
@@ -163,6 +166,7 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         self._tool_batch_needs_response = False
 
         self._proactive_vision: ProactiveVisionEngine | None = None
+        self._ring_watcher: RingWatcherEngine | None = None
         self._voice_effect_state = VoiceEffectState()
 
     @staticmethod
@@ -511,10 +515,47 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
             get_frame_jpeg=self._proactive_vision_frame,
             is_ready=lambda: self.connection is not None and self._response_done_event.is_set(),
             seconds_since_activity=lambda: time.monotonic() - self.last_activity_time,
-            send_prompt=self._send_proactive_vision_prompt,
+            send_prompt=self._send_image_nudge_prompt,
         )
         self._proactive_vision.start()
         logger.info("Proactive vision enabled for profile %r: %s", profile, vision_config)
+
+    async def _setup_ring_watcher(self) -> None:
+        """Start or stop the Ring event watcher loop to match the active profile."""
+        profile = getattr(config, "REACHY_MINI_CUSTOM_PROFILE", None) or "default"
+        try:
+            profile_dir = config.resolve_profile_dir(profile)
+            watcher_config = load_ring_watcher_config(profile_dir)
+        except Exception as e:
+            logger.warning("Failed to load Ring watcher config for profile %r: %s", profile, e)
+            watcher_config = None
+
+        if self._ring_watcher is not None:
+            await self._ring_watcher.stop()
+            self._ring_watcher = None
+
+        if watcher_config is None:
+            return
+
+        if self.deps.ring_client is None:
+            logger.warning("Ring watcher enabled for profile %r but Ring is not configured; skipping", profile)
+            return
+
+        self._ring_watcher = RingWatcherEngine(
+            watcher_config,
+            ring_client=self.deps.ring_client,
+            is_ready=lambda: self.connection is not None and self._response_done_event.is_set(),
+            send_prompt=self._send_image_nudge_prompt,
+            play_emotion=self._react_to_ring_event,
+        )
+        self._ring_watcher.start()
+        logger.info("Ring watcher enabled for profile %r: %s", profile, watcher_config)
+
+    async def _react_to_ring_event(self, emotion: str) -> None:
+        """Play a physical emotion reaction for a new Ring event, via the normal tool dispatch path."""
+        result = await dispatch_tool_call("play_emotion", json.dumps({"emotion": emotion}), self.deps)
+        if "error" in result:
+            logger.warning("Ring watcher's play_emotion reaction failed: %s", result["error"])
 
     def _setup_speaker_tracking(self) -> None:
         """Enable DoA-assisted speaker-facing only for profiles that opt in via a marker file."""
@@ -539,8 +580,12 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
             logger.warning("Proactive vision could not read a camera frame: %s", e)
             return None
 
-    async def _send_proactive_vision_prompt(self, b64_image: str, nudge_text: str) -> None:
-        """Inject a fresh camera frame plus a short nudge, then prompt for a spoken reaction."""
+    async def _send_image_nudge_prompt(self, b64_image: str, nudge_text: str) -> None:
+        """Inject an image plus a short text nudge, then prompt for a spoken reaction.
+
+        Shared by proactive vision and the Ring event watcher — both just need to
+        surface a fresh image with a one-line hint and let the model react freely.
+        """
         if not self.connection:
             return
         try:
@@ -554,11 +599,11 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                     ],
                 },
             )
-            self._mark_activity("proactive_vision_prompt")
+            self._mark_activity("image_nudge_prompt")
             await self._safe_response_create()
-            logger.info("Queued proactive vision prompt")
+            logger.info("Queued image nudge prompt: %s", nudge_text)
         except Exception as e:
-            logger.warning("Failed to queue proactive vision prompt: %s", e)
+            logger.warning("Failed to queue image nudge prompt: %s", e)
 
     async def _send_startup_greeting_prompt(self) -> None:
         """Prompt the model to open the conversation once the session is ready."""
@@ -853,6 +898,7 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                 response_sender_task = asyncio.create_task(self._response_sender_loop(), name="response-sender")
                 await self._send_startup_greeting_prompt()
                 await self._setup_proactive_vision()
+                await self._setup_ring_watcher()
                 self._setup_speaker_tracking()
 
                 async for event in self.connection:
@@ -1125,6 +1171,10 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         if self._proactive_vision is not None:
             await self._proactive_vision.stop()
             self._proactive_vision = None
+
+        if self._ring_watcher is not None:
+            await self._ring_watcher.stop()
+            self._ring_watcher = None
 
         # Stop background tool manager tasks (listener + cleanup)
         await self.tool_manager.shutdown()
