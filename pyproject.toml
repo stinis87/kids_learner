@@ -27,6 +27,9 @@ dependencies = [
 
     #Wake word detection
     "openwakeword>=0.6.0",
+
+    #Ring camera snapshots (unofficial, reverse-engineered API; no official Ring SDK exists)
+    "ring-doorbell>=0.9.7",
 ]
 
 [dependency-groups]

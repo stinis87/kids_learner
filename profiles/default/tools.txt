@@ -3,6 +3,7 @@ stop_dance
 play_emotion
 stop_emotion
 camera
+check_ring_camera
 idle_do_nothing
 move_head
 go_to_sleep

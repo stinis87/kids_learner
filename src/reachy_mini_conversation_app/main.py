@@ -73,6 +73,12 @@ def main() -> None:
         except Exception as exc:
             logger.error("tool-spaces command failed: %s", exc)
             raise SystemExit(1) from exc
+    if args.ring_login:
+        from reachy_mini_conversation_app.ring_login import run_ring_login
+
+        setup_logger(args.debug)
+        run_ring_login()
+        return
     run(args)
 
 
@@ -157,11 +163,14 @@ def run(
 
     movement_manager = MovementManager(current_robot=robot)
 
+    from reachy_mini_conversation_app.ring_client import RingClient
+
     deps = ToolDependencies(
         reachy_mini=robot,
         movement_manager=movement_manager,
         instance_path=instance_path,
         camera_enabled=not args.no_camera,
+        ring_client=RingClient(instance_path=instance_path),
     )
 
     def build_handler(startup_voice: Optional[str] = None) -> ConversationHandler:

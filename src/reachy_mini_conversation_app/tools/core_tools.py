@@ -25,6 +25,7 @@ from reachy_mini_conversation_app.tools.tool_constants import SystemTool
 
 if TYPE_CHECKING:
     from reachy_mini_conversation_app.mcp_client import RemoteMcpToolClient
+    from reachy_mini_conversation_app.ring_client import RingClient
     from reachy_mini_conversation_app.tools.background_tool_manager import BackgroundToolManager
 
 
@@ -47,6 +48,7 @@ class ToolDependencies:
     motion_duration_s: float = 1.0
     go_to_sleep: Callable[[], dict[str, Any]] | None = None
     apply_personality: Callable[[str | None], Awaitable[str]] | None = None
+    ring_client: "RingClient | None" = None
 
 
 class ToolSpec(TypedDict):

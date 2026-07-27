@@ -17,6 +17,12 @@ def parse_args() -> tuple[argparse.Namespace, list]:  # type: ignore
     )
     parser.add_argument("--debug", default=False, action="store_true", help="Enable debug logging")
     parser.add_argument(
+        "--ring-login",
+        default=False,
+        action="store_true",
+        help="Interactively log in to Ring and cache the token for the check_ring_camera tool, then exit",
+    )
+    parser.add_argument(
         "--robot-name",
         type=str,
         default=None,

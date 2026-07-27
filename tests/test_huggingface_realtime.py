@@ -463,3 +463,36 @@ async def test_receive_clears_input_buffer_when_gate_closes_mid_utterance() -> N
 
     handler.connection.input_audio_buffer.clear.assert_awaited_once()
     handler.connection.input_audio_buffer.append.assert_not_awaited()
+
+
+def test_sanitize_tool_result_strips_b64_im_from_images_list() -> None:
+    """A multi-image tool result (e.g. check_ring_camera) has its base64 stripped, per image."""
+    tool_result = {
+        "images": [
+            {"label": "Garden", "b64_im": "aaaa"},
+            {"label": "bod", "error": "camera offline"},
+        ],
+    }
+
+    sanitized = HuggingFaceRealtimeHandler._sanitize_tool_result_for_model("check_ring_camera", tool_result)
+
+    assert sanitized["images"][0] == {"label": "Garden", "image_attached": True}
+    assert sanitized["images"][1] == {"label": "bod", "error": "camera offline"}
+
+
+@pytest.mark.asyncio
+async def test_inject_tool_images_sends_one_input_image_per_entry() -> None:
+    """Each successfully-snapshotted image is injected as its own input_image message."""
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler.connection = AsyncMock()
+
+    await handler._inject_tool_images(
+        [
+            {"label": "Garden", "b64_im": "aaaa"},
+            {"label": "bod", "error": "camera offline"},
+        ],
+    )
+
+    assert handler.connection.conversation.item.create.await_count == 1
+    sent_item = handler.connection.conversation.item.create.await_args.kwargs["item"]
+    assert sent_item["content"][0]["image_url"] == "data:image/jpeg;base64,aaaa"

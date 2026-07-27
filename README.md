@@ -177,6 +177,7 @@ The app runs in console mode by default. Add `--ui` to also serve a web UI at ht
 | `--ui` | `False` | Serve the web UI at http://127.0.0.1:7860/, in addition to console mode. |
 | `--robot-name` | `None` | Optional. Connect to a specific robot by name when running multiple daemons on the same subnet. See [Multiple robots on the same subnet](#advanced-features). |
 | `--debug` | `False` | Enable verbose logging for troubleshooting. |
+| `--ring-login` | `False` | One-time interactive login to your Ring account for the `check_ring_camera` tool; caches a token and exits. See [Ring cameras](#advanced-features). |
 
 ### Examples
 
@@ -211,6 +212,7 @@ The default profile exposes these tools. Custom profiles can enable a different 
 | `pollen_robotics_reachy_mini_weather_tool__get_weather` | Report today's weather for a place: current conditions, high and low temperature, and rain chance. | Preinstalled MCP Space: `pollen-robotics/reachy-mini-weather-tool`. |
 | `pollen_robotics_reachy_mini_time_tool__get_time` | Report the current time for a timezone or the user's local time, or the difference between two timezones. | Preinstalled MCP Space: `pollen-robotics/reachy-mini-time-tool`. |
 | `switch_profile` | Switch Reachy's active personality profile by voice (e.g. "let's read a bedtime story", "go back to normal"). | Core install only. Restarts the realtime session, same as switching profiles from the UI. |
+| `check_ring_camera` | Fetch a fresh snapshot from one Ring camera (by the name configured in the Ring app) or all of them at once, and describe what's happening. | Core install only. Requires a one-time `--ring-login`. See [Ring cameras](#advanced-features). |
 
 > [!NOTE]
 > `remember`/`forget` facts are stored in `memory.v1.json` inside the app's instance data directory (`~/.local/share/reachy_mini_conversation_app/` by default, or the instance path used by the desktop launcher). `forget` only removes facts matched by query. To reset all remembered facts, delete this file.
@@ -229,6 +231,26 @@ Reachy starts awake and listening. Saying the wake word (default: "Alexa") puts 
 Reachy tucks its head down and relaxes its antennas while dormant, and snaps back up alert once woken up. If the model can't be loaded (e.g. no network on first run), the app falls back to always listening rather than staying silent.
 
 Set `WAKE_WORD_MODEL` to any other [pretrained openWakeWord model name](https://github.com/dscripka/openWakeWord#pretrained-models) (e.g. `hey_jarvis`, `hey_mycroft`), tune sensitivity with `WAKE_WORD_THRESHOLD`, or set `WAKE_WORD_ENABLED=0` to disable the gate entirely.
+
+</details>
+
+<details>
+<summary><b>Ring cameras</b></summary>
+
+The `check_ring_camera` tool lets Reachy answer "what's happening in the garden/at the front door/in the shed (bod)?" (or "check all cameras") by fetching a fresh snapshot from your Ring devices. It uses the unofficial [`ring_doorbell`](https://github.com/python-ring-doorbell/python-ring-doorbell) library against your own Ring account — Ring has no official public API for personal integrations, so this can break if Ring changes its backend.
+
+In the Ring app, name each doorbell/camera the way you want to refer to it out loud — the tool matches your account's device names exactly (e.g. "Garden", "Front Door", "bod"). A few Norwegian synonyms also resolve to matching device names: "hage" → "Garden", "framsiden" → "Front Door".
+
+Before first use, run the one-time interactive login, which caches an OAuth token (no password stored):
+
+```bash
+reachy-mini-conversation-app --ring-login
+```
+
+Override where the cached token is stored with `RING_TOKEN_CACHE_PATH` (defaults next to the app's other instance data). Re-run `--ring-login` if the cached token expires.
+
+> [!NOTE]
+> The cached token file grants access to your Ring account, so it's written with owner-only permissions (`0600`) and, like `.env`, must never be committed or shared. Each snapshot is also sent to the configured realtime backend (e.g. Hugging Face) for image analysis, the same way the built-in `camera` tool already sends webcam frames — don't enable this tool if you don't want your Ring footage leaving the device for that analysis.
 
 </details>
 

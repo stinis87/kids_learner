@@ -173,7 +173,45 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
             sanitized.pop("b64_im", None)
             sanitized["image_attached"] = True
             return sanitized
+        images = tool_result.get("images")
+        if isinstance(images, list):
+            sanitized = dict(tool_result)
+            sanitized["images"] = [
+                {**{k: v for k, v in image.items() if k != "b64_im"}, "image_attached": True}
+                if isinstance(image, dict) and "b64_im" in image
+                else image
+                for image in images
+            ]
+            return sanitized
         return tool_result
+
+    async def _inject_tool_images(self, images: list[Any]) -> None:
+        """Add each labelled snapshot from a multi-image tool result as an input_image message."""
+        if not self.connection:
+            logger.warning("Connection closed before injecting tool images")
+            return
+
+        for image in images:
+            if not isinstance(image, dict) or "b64_im" not in image:
+                continue
+            b64_im = image["b64_im"]
+            if not isinstance(b64_im, str):
+                logger.warning("Unexpected type for b64_im: %s", type(b64_im))
+                continue
+            label = image.get("label")
+            await self.connection.conversation.item.create(
+                item={
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:image/jpeg;base64,{b64_im}",
+                        },
+                    ],
+                },
+            )
+            logger.info("Added tool image to conversation label=%s jpeg_bytes=%s", label, (len(b64_im) * 3) // 4)
 
     def _normalize_startup_voice(self, voice: str | None) -> str | None:
         """Return a valid persisted startup voice, or None."""
@@ -747,6 +785,10 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                         "Added camera image to conversation jpeg_bytes=%s",
                         jpeg_bytes,
                     )
+
+            tool_images = tool_result.get("images")
+            if model_result_submitted and isinstance(tool_images, list):
+                await self._inject_tool_images(tool_images)
 
             if isinstance(completed_tool.id, str):
                 self._in_flight_tool_calls.discard(completed_tool.id)
