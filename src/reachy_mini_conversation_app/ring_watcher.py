@@ -148,9 +148,25 @@ class RingWatcherEngine:
 
             last_reacted_at = self._last_reacted_at.get(device_name, 0.0)
             if time.monotonic() - last_reacted_at < self._config.device_cooldown_seconds:
+                logger.debug(
+                    "Ring watcher: new '%s' event at '%s' (id=%s) ignored, still in cooldown",
+                    event.kind,
+                    device_name,
+                    event.event_id,
+                )
                 continue
             if not self._is_ready():
+                logger.debug(
+                    "Ring watcher: new '%s' event at '%s' (id=%s) ignored, model not ready",
+                    event.kind,
+                    device_name,
+                    event.event_id,
+                )
                 continue
+
+            logger.info(
+                "Ring watcher: reacting to new '%s' event at '%s' (id=%s)", event.kind, device_name, event.event_id
+            )
 
             try:
                 jpeg_bytes = await self._ring_client.async_get_device_snapshot(device_name)
