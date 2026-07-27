@@ -269,7 +269,17 @@ class BackgroundToolManager(BaseModel):
             while True:
                 background_tool = await self._notification_queue.get()
                 for callback in tool_callbacks:
-                    await callback(background_tool)
+                    try:
+                        await callback(background_tool)
+                    except Exception:
+                        # A bug in one callback must not silently kill this loop for the
+                        # rest of the session — every future tool result would otherwise
+                        # never reach the model again.
+                        logger.exception(
+                            "Tool result callback failed for tool '%s' (id=%s)",
+                            background_tool.tool_name,
+                            background_tool.id,
+                        )
 
         async def _cleanup(interval_seconds: float = 5 * 60) -> None:
             while True:

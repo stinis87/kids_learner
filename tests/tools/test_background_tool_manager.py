@@ -517,6 +517,19 @@ class TestStartUp:
         assert cb1.call_count == 1
         assert cb2.call_count == 1
 
+    @pytest.mark.asyncio
+    async def test_crashing_callback_does_not_kill_future_notifications(self, manager: BackgroundToolManager) -> None:
+        """A bug in one tool result callback must not silently break the rest of the session."""
+        crashing_callback = AsyncMock(side_effect=RuntimeError("boom"))
+        manager.start_up(tool_callbacks=[crashing_callback])
+
+        await manager.start_tool("c1", _make_routine("first"), is_idle_tool_call=False)
+        await asyncio.sleep(0.1)
+        await manager.start_tool("c2", _make_routine("second"), is_idle_tool_call=False)
+        await asyncio.sleep(0.1)
+
+        assert crashing_callback.call_count == 2
+
 
 class TestNotificationQueue:
     """Verify notifications are enqueued on tool completion or failure."""
