@@ -23,6 +23,7 @@ RING_TOKEN_CACHE_PATH_ENV = "RING_TOKEN_CACHE_PATH"
 # tool matches the same device no matter which language the user asks in.
 LOCATION_ALIASES: dict[str, str] = {
     "hage": "garden",
+    "hagen": "garden",
     "framsiden": "front door",
 }
 

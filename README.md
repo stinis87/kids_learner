@@ -239,7 +239,7 @@ Set `WAKE_WORD_MODEL` to any other [pretrained openWakeWord model name](https://
 
 The `check_ring_camera` tool lets Reachy answer "what's happening in the garden/at the front door/in the shed (bod)?" (or "check all cameras") by fetching a fresh snapshot from your Ring devices. It uses the unofficial [`ring_doorbell`](https://github.com/python-ring-doorbell/python-ring-doorbell) library against your own Ring account — Ring has no official public API for personal integrations, so this can break if Ring changes its backend.
 
-In the Ring app, name each doorbell/camera the way you want to refer to it out loud — the tool matches your account's device names exactly (e.g. "Garden", "Front Door", "bod"). A few Norwegian synonyms also resolve to matching device names: "hage" → "Garden", "framsiden" → "Front Door".
+In the Ring app, name each doorbell/camera the way you want to refer to it out loud — the tool matches your account's device names exactly (e.g. "Garden", "Front Door", "bod"). A few Norwegian synonyms also resolve to matching device names: "hage"/"hagen" → "Garden", "framsiden" → "Front Door".
 
 Before first use, run the one-time interactive login, which caches an OAuth token (no password stored):
 
