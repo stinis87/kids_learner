@@ -126,6 +126,26 @@ WAKE_WORD_THRESHOLD_ENV = "WAKE_WORD_THRESHOLD"
 DEFAULT_WAKE_WORD_MODEL = "alexa"
 DEFAULT_WAKE_WORD_THRESHOLD = 0.5
 
+KID_VOICE_EFFECT_ENABLED_ENV = "KID_VOICE_EFFECT_ENABLED"
+KID_VOICE_PITCH_FACTOR_ENV = "KID_VOICE_PITCH_FACTOR"
+KID_VOICE_ROBOT_MIX_ENV = "KID_VOICE_ROBOT_MIX"
+KID_VOICE_ROBOT_CARRIER_HZ_ENV = "KID_VOICE_ROBOT_CARRIER_HZ"
+DEFAULT_KID_VOICE_PITCH_FACTOR = 1.25
+DEFAULT_KID_VOICE_ROBOT_MIX = 0.2
+DEFAULT_KID_VOICE_ROBOT_CARRIER_HZ = 60.0
+
+
+def _env_float(name: str, default: float) -> float:
+    """Parse a float environment variable, falling back to `default` on empty/invalid values."""
+    raw_value = os.getenv(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        logger.warning("Invalid float value for %s=%r, using default=%s", name, raw_value, default)
+        return default
+
 
 def _resolve_wake_word_threshold() -> float:
     """Read the wake-word detection threshold (0-1) from the environment."""
@@ -333,6 +353,13 @@ class Config:
     WAKE_WORD_MODEL = os.getenv(WAKE_WORD_MODEL_ENV, "").strip() or DEFAULT_WAKE_WORD_MODEL
     WAKE_WORD_THRESHOLD = _resolve_wake_word_threshold()
 
+    # Kid-friendly voice effect: pitches the TTS output up and adds a light
+    # robotic ring-modulation touch. Enabled by default since this app talks to children.
+    KID_VOICE_EFFECT_ENABLED = _env_flag(KID_VOICE_EFFECT_ENABLED_ENV, default=True)
+    KID_VOICE_PITCH_FACTOR = _env_float(KID_VOICE_PITCH_FACTOR_ENV, DEFAULT_KID_VOICE_PITCH_FACTOR)
+    KID_VOICE_ROBOT_MIX = _env_float(KID_VOICE_ROBOT_MIX_ENV, DEFAULT_KID_VOICE_ROBOT_MIX)
+    KID_VOICE_ROBOT_CARRIER_HZ = _env_float(KID_VOICE_ROBOT_CARRIER_HZ_ENV, DEFAULT_KID_VOICE_ROBOT_CARRIER_HZ)
+
     logger.debug(
         "HF mode: %s, HF session URL set: %s, HF direct URL set: %s",
         HF_REALTIME_CONNECTION_MODE,
@@ -443,6 +470,10 @@ def refresh_runtime_config_from_env() -> None:
     config.WAKE_WORD_ENABLED = _env_flag(WAKE_WORD_ENABLED_ENV, default=True)
     config.WAKE_WORD_MODEL = os.getenv(WAKE_WORD_MODEL_ENV, "").strip() or DEFAULT_WAKE_WORD_MODEL
     config.WAKE_WORD_THRESHOLD = _resolve_wake_word_threshold()
+    config.KID_VOICE_EFFECT_ENABLED = _env_flag(KID_VOICE_EFFECT_ENABLED_ENV, default=True)
+    config.KID_VOICE_PITCH_FACTOR = _env_float(KID_VOICE_PITCH_FACTOR_ENV, DEFAULT_KID_VOICE_PITCH_FACTOR)
+    config.KID_VOICE_ROBOT_MIX = _env_float(KID_VOICE_ROBOT_MIX_ENV, DEFAULT_KID_VOICE_ROBOT_MIX)
+    config.KID_VOICE_ROBOT_CARRIER_HZ = _env_float(KID_VOICE_ROBOT_CARRIER_HZ_ENV, DEFAULT_KID_VOICE_ROBOT_CARRIER_HZ)
 
 
 def get_available_voices() -> list[str]:

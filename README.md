@@ -112,6 +112,10 @@ Copy `.env.example` to `.env` when you want to point Hugging Face at your own lo
 | `WAKE_WORD_ENABLED` | Gate the microphone behind a wake word. Defaults to `1` (enabled). |
 | `WAKE_WORD_MODEL` | Pretrained [openWakeWord](https://github.com/dscripka/openWakeWord) model to listen for. Defaults to `alexa`. |
 | `WAKE_WORD_THRESHOLD` | Detection score (0-1) required to trigger the wake word. Defaults to `0.5`. |
+| `KID_VOICE_EFFECT_ENABLED` | Pitch the assistant's TTS voice up and add a light robotic ring-modulation touch. Defaults to `1` (enabled). |
+| `KID_VOICE_PITCH_FACTOR` | Pitch/speed multiplier applied to the voice (`>1` raises pitch). Defaults to `1.25`. |
+| `KID_VOICE_ROBOT_MIX` | Ring-modulation wet mix (0-1). Defaults to `0.2`. |
+| `KID_VOICE_ROBOT_CARRIER_HZ` | Ring-modulation carrier frequency in Hz. Defaults to `60`. |
 
 ### Hugging Face Connection Modes
 

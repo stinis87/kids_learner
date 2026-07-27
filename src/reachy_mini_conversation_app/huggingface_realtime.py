@@ -49,6 +49,7 @@ from reachy_mini_conversation_app.tools.core_tools import (
     ToolDependencies,
     get_tool_specs,
 )
+from reachy_mini_conversation_app.audio.voice_effect import VoiceEffectState, apply_kid_robot_voice_effect
 from reachy_mini_conversation_app.conversation_handler import ConversationHandler
 from reachy_mini_conversation_app.tools.background_tool_manager import (
     ToolCallRoutine,
@@ -162,6 +163,7 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         self._tool_batch_needs_response = False
 
         self._proactive_vision: ProactiveVisionEngine | None = None
+        self._voice_effect_state = VoiceEffectState()
 
     @staticmethod
     def _sanitize_tool_result_for_model(tool_name: str, tool_result: dict[str, Any]) -> dict[str, Any]:
@@ -791,6 +793,7 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
 
             # Reset the partial-transcript accumulator for each new session
             self.input_transcript_chunks_by_item = InputTranscriptChunksByItem()
+            self._voice_effect_state.reset()
 
             # Manage events received from the realtime server.
             self.connection = conn
@@ -910,6 +913,15 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                     if event.type == "response.output_audio.delta":
                         decoded_pcm_bytes = base64.b64decode(event.delta)
                         decoded_pcm = np.frombuffer(decoded_pcm_bytes, dtype=np.int16).reshape(1, -1)
+                        if config.KID_VOICE_EFFECT_ENABLED:
+                            decoded_pcm = apply_kid_robot_voice_effect(
+                                decoded_pcm,
+                                self.SAMPLE_RATE,
+                                state=self._voice_effect_state,
+                                pitch_factor=config.KID_VOICE_PITCH_FACTOR,
+                                robot_mix=config.KID_VOICE_ROBOT_MIX,
+                                robot_carrier_hz=config.KID_VOICE_ROBOT_CARRIER_HZ,
+                            )
                         self._mark_activity("assistant_audio_delta")
                         if self._turn_user_done_at is not None and self._turn_first_audio_at is None:
                             self._turn_first_audio_at = time.perf_counter()
