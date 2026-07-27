@@ -41,6 +41,11 @@ _EMOTION_FOR_KIND = {
     "motion": "attentive",
 }
 
+# How often to log a heartbeat confirming the watcher is still polling, even
+# when nothing has happened — lets you tell "silently idle" apart from "not
+# running at all" without flooding the log at every poll interval.
+_HEARTBEAT_INTERVAL_SECONDS = 900.0
+
 
 @dataclass(frozen=True)
 class RingWatcherConfig:
@@ -100,6 +105,7 @@ class RingWatcherEngine:
         self._last_event_ids: dict[str, int] = {}
         self._last_reacted_at: dict[str, float] = {}
         self._seeded = False
+        self._last_heartbeat_at = 0.0
 
     def start(self) -> None:
         """Start the background polling loop if it isn't already running."""
@@ -108,6 +114,7 @@ class RingWatcherEngine:
         self._last_event_ids = {}
         self._last_reacted_at = {}
         self._seeded = False
+        self._last_heartbeat_at = time.monotonic()
         self._task = asyncio.create_task(self._run(), name="ring-watcher")
 
     async def stop(self) -> None:
@@ -133,6 +140,12 @@ class RingWatcherEngine:
 
     async def _poll_once(self) -> None:
         events = await self._ring_client.async_get_latest_events(_WATCHED_KINDS)
+        logger.debug("Ring watcher: polled %d device(s)", len(events))
+
+        now = time.monotonic()
+        if now - self._last_heartbeat_at >= _HEARTBEAT_INTERVAL_SECONDS:
+            self._last_heartbeat_at = now
+            logger.info("Ring watcher: still running, monitoring %d device(s)", len(events))
 
         if not self._seeded:
             # Seed "last seen" ids from whatever is already in history so we don't
