@@ -28,7 +28,7 @@ def parse_args() -> tuple[argparse.Namespace, list]:  # type: ignore
         action="store_true",
         help=(
             "Verify the cached Ring login works: list devices, fetch one snapshot from each, "
-            "save them as JPEGs in the current directory, then exit"
+            "save them as JPEGs in a local ring_images/ folder (gitignored), then exit"
         ),
     )
     parser.add_argument(

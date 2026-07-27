@@ -68,3 +68,6 @@ src/reachy_mini_conversation_app/profiles/user_personalities/
 external_content/external_profiles/*
 external_content/external_tools/*
 external_content/installed_tool_spaces.json
+
+# Snapshots saved by `--ring-check` (personal camera footage, never commit)
+ring_images/

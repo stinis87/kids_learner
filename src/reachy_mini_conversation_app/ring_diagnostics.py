@@ -15,6 +15,9 @@ from reachy_mini_conversation_app.ring_client import RingClient, RingNotConfigur
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_SNAPSHOT_DIR_NAME = "ring_images"
+
+
 async def async_run_ring_diagnostics(instance_path: str | None = None, *, save_dir: str | None = None) -> None:
     """Log in with the cached token, list devices, and fetch one snapshot from each."""
     client = RingClient(instance_path=instance_path)
@@ -35,7 +38,7 @@ async def async_run_ring_diagnostics(instance_path: str | None = None, *, save_d
 
         print(f"Connected to Ring. Found {len(locations)} device(s): {', '.join(locations)}")
 
-        output_dir = Path(save_dir).expanduser() if save_dir else Path.cwd()
+        output_dir = Path(save_dir).expanduser() if save_dir else Path.cwd() / DEFAULT_SNAPSHOT_DIR_NAME
         output_dir.mkdir(parents=True, exist_ok=True)
 
         for location in locations:

@@ -178,7 +178,7 @@ The app runs in console mode by default. Add `--ui` to also serve a web UI at ht
 | `--robot-name` | `None` | Optional. Connect to a specific robot by name when running multiple daemons on the same subnet. See [Multiple robots on the same subnet](#advanced-features). |
 | `--debug` | `False` | Enable verbose logging for troubleshooting. |
 | `--ring-login` | `False` | One-time interactive login to your Ring account for the `check_ring_camera` tool; caches a token and exits. See [Ring cameras](#advanced-features). |
-| `--ring-check` | `False` | Verify the cached Ring login: lists your devices, fetches one snapshot from each, saves them as JPEGs in the current directory, then exits. See [Ring cameras](#advanced-features). |
+| `--ring-check` | `False` | Verify the cached Ring login: lists your devices, fetches one snapshot from each, saves them as JPEGs in a local `ring_images/` folder (gitignored), then exits. See [Ring cameras](#advanced-features). |
 
 ### Examples
 
@@ -254,12 +254,12 @@ Then verify it actually works end to end — this reuses the same code path as t
 reachy-mini-conversation-app --ring-check
 ```
 
-This lists your Ring devices, fetches one snapshot from each, and saves them as `ring_snapshot_<device>.jpg` in the current directory so you can open them and confirm the image actually shows the right camera feed.
+This lists your Ring devices, fetches one snapshot from each, and saves them as `ring_images/ring_snapshot_<device>.jpg` (gitignored) so you can open them and confirm the image actually shows the right camera feed.
 
 Override where the cached token is stored with `RING_TOKEN_CACHE_PATH` (defaults next to the app's other instance data). Re-run `--ring-login` if the cached token expires.
 
 > [!NOTE]
-> The cached token file grants access to your Ring account, so it's written with owner-only permissions (`0600`) and, like `.env`, must never be committed or shared. Each snapshot is also sent to the configured realtime backend (e.g. Hugging Face) for image analysis, the same way the built-in `camera` tool already sends webcam frames — don't enable this tool if you don't want your Ring footage leaving the device for that analysis.
+> The cached token file grants access to your Ring account, so it's written with owner-only permissions (`0600`) and, like `.env`, must never be committed or shared. During normal conversation, `check_ring_camera` sends each snapshot straight to the configured realtime backend (e.g. Hugging Face) for image analysis without ever writing it to disk — the same way the built-in `camera` tool already sends webcam frames. `--ring-check` is the only place snapshots are saved locally (into `ring_images/`, already gitignored), purely so you can visually confirm the feed is correct; delete that folder once you're done.
 
 </details>
 

@@ -41,6 +41,26 @@ async def test_saves_one_jpeg_per_device(tmp_path: object, capsys: pytest.Captur
 
 
 @pytest.mark.asyncio
+async def test_default_save_dir_is_ring_images_under_cwd(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no explicit save_dir, snapshots land in a gitignored ring_images/ folder."""
+    monkeypatch.chdir(tmp_path)
+    with (
+        patch(
+            "reachy_mini_conversation_app.ring_diagnostics.RingClient.async_list_locations",
+            AsyncMock(return_value=["Garden"]),
+        ),
+        patch(
+            "reachy_mini_conversation_app.ring_diagnostics.RingClient.async_get_device_snapshot",
+            AsyncMock(return_value=b"\xff\xd8jpeg\xff\xd9"),
+        ),
+    ):
+        await async_run_ring_diagnostics()
+
+    saved_files = sorted(p.name for p in (tmp_path / "ring_images").iterdir())  # type: ignore[operator]
+    assert saved_files == ["ring_snapshot_garden.jpg"]
+
+
+@pytest.mark.asyncio
 async def test_one_failing_device_does_not_stop_the_others(tmp_path: object) -> None:
     """A single device erroring out still lets the diagnostic finish and save the rest."""
 
