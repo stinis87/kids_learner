@@ -79,6 +79,12 @@ def main() -> None:
         setup_logger(args.debug)
         run_ring_login()
         return
+    if args.ring_check:
+        from reachy_mini_conversation_app.ring_diagnostics import run_ring_diagnostics
+
+        setup_logger(args.debug)
+        run_ring_diagnostics()
+        return
     run(args)
 
 

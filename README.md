@@ -178,6 +178,7 @@ The app runs in console mode by default. Add `--ui` to also serve a web UI at ht
 | `--robot-name` | `None` | Optional. Connect to a specific robot by name when running multiple daemons on the same subnet. See [Multiple robots on the same subnet](#advanced-features). |
 | `--debug` | `False` | Enable verbose logging for troubleshooting. |
 | `--ring-login` | `False` | One-time interactive login to your Ring account for the `check_ring_camera` tool; caches a token and exits. See [Ring cameras](#advanced-features). |
+| `--ring-check` | `False` | Verify the cached Ring login: lists your devices, fetches one snapshot from each, saves them as JPEGs in the current directory, then exits. See [Ring cameras](#advanced-features). |
 
 ### Examples
 
@@ -246,6 +247,14 @@ Before first use, run the one-time interactive login, which caches an OAuth toke
 ```bash
 reachy-mini-conversation-app --ring-login
 ```
+
+Then verify it actually works end to end — this reuses the same code path as the live tool, so a successful run means `check_ring_camera` will work in conversation:
+
+```bash
+reachy-mini-conversation-app --ring-check
+```
+
+This lists your Ring devices, fetches one snapshot from each, and saves them as `ring_snapshot_<device>.jpg` in the current directory so you can open them and confirm the image actually shows the right camera feed.
 
 Override where the cached token is stored with `RING_TOKEN_CACHE_PATH` (defaults next to the app's other instance data). Re-run `--ring-login` if the cached token expires.
 

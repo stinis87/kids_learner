@@ -7,10 +7,13 @@ reverse-engineered backend as the Ring mobile app via ``ring_doorbell``.
 from __future__ import annotations
 import os
 import json
+import time
+import asyncio
 import logging
 from pathlib import Path
 
-from ring_doorbell import Auth, Ring, AuthenticationError
+from ring_doorbell import Auth, Ring, RingError, AuthenticationError
+from ring_doorbell.doorbot import RingDoorBell
 
 
 logger = logging.getLogger(__name__)
@@ -18,6 +21,21 @@ logger = logging.getLogger(__name__)
 RING_USER_AGENT = "reachy-mini-conversation-app"
 RING_TOKEN_CACHE_FILENAME = "ring_token.v1.json"
 RING_TOKEN_CACHE_PATH_ENV = "RING_TOKEN_CACHE_PATH"
+
+# ring_doorbell's bundled `async_get_snapshot` polls a legacy Ring endpoint that
+# no longer reliably serves images (see
+# python-ring-doorbell/python-ring-doorbell#527); it now raises IndexError or
+# silently returns None for most devices, regardless of device settings. We
+# instead call the newer on-demand endpoint used by the official Ring app and
+# by ring-mqtt directly, the same fix proposed upstream in PR #528 but not yet
+# released. `after-ms`/`max-wait-ms`/`extras=force` ask Ring to generate a
+# fresh image on the fly if none younger than `max_age` seconds already exists.
+_SNAPSHOT_API_URI = "https://app-snaps.ring.com"
+_SNAPSHOT_ENDPOINT = "/snapshots/next/{0}"
+_SNAPSHOT_MAX_AGE_S = 30
+_SNAPSHOT_MAX_WAIT_S = 10
+_SNAPSHOT_ATTEMPTS = 3
+_SNAPSHOT_ATTEMPT_BACKOFF_S = 2
 
 # Norwegian synonyms for the English device names recommended in the README, so the
 # tool matches the same device no matter which language the user asks in.
@@ -55,6 +73,46 @@ def write_token_cache(path: Path, token: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(token))
     os.chmod(path, 0o600)
+
+
+async def _take_snapshot(ring: Ring, device: RingDoorBell) -> bytes:
+    """Fetch one snapshot from Ring's on-demand endpoint, forcing a fresh capture."""
+    params = {
+        "after-ms": int((time.time() - _SNAPSHOT_MAX_AGE_S) * 1000),
+        "max-wait-ms": _SNAPSHOT_MAX_WAIT_S * 1000,
+        "extras": "force",
+    }
+    response = await ring.async_query(
+        _SNAPSHOT_ENDPOINT.format(device.id),
+        extra_params=params,
+        base_uri=_SNAPSHOT_API_URI,
+        timeout=_SNAPSHOT_MAX_WAIT_S + 5,
+    )
+    if not response.content:
+        raise RuntimeError(f"Ring device '{device.name}' did not return a snapshot")
+    return response.content
+
+
+async def _get_snapshot_with_retry(ring: Ring, device: RingDoorBell) -> bytes:
+    """Fetch a snapshot from a Ring device, retrying transient server timeouts.
+
+    A 404/timeout from the on-demand endpoint typically just means the device
+    hasn't produced a fresh image within `max_wait`, which is worth retrying
+    rather than treating as a permanent failure.
+    """
+    last_error: Exception | None = None
+    for attempt in range(_SNAPSHOT_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(_SNAPSHOT_ATTEMPT_BACKOFF_S)
+        try:
+            return await _take_snapshot(ring, device)
+        except (RingError, RuntimeError) as e:
+            last_error = e
+
+    raise RuntimeError(
+        f"Ring device '{device.name}' did not return a snapshot after {_SNAPSHOT_ATTEMPTS} attempts. "
+        "It may be asleep or offline."
+    ) from last_error
 
 
 class RingClient:
@@ -107,13 +165,16 @@ class RingClient:
             known_names = ", ".join(sorted(device.name for device in video_devices))
             raise RingDeviceNotFoundError(f"No Ring device named '{location}'. Known devices: {known_names}")
 
-        snapshot = await matching_device.async_get_snapshot()
-        if snapshot is None:
-            raise RuntimeError(f"Ring device '{matching_device.name}' did not return a snapshot")
-        return snapshot
+        return await _get_snapshot_with_retry(ring, matching_device)
 
     async def async_list_locations(self) -> list[str]:
         """Return the friendly names of all doorbell/camera devices on the account."""
         ring = await self._get_ring()
         await ring.async_update_devices()
         return [device.name for device in ring.video_devices()]
+
+    async def async_close(self) -> None:
+        """Close the underlying HTTP session, if one was ever created."""
+        if self._ring is not None:
+            await self._ring.auth.async_close()
+            self._ring = None

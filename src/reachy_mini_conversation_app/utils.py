@@ -23,6 +23,15 @@ def parse_args() -> tuple[argparse.Namespace, list]:  # type: ignore
         help="Interactively log in to Ring and cache the token for the check_ring_camera tool, then exit",
     )
     parser.add_argument(
+        "--ring-check",
+        default=False,
+        action="store_true",
+        help=(
+            "Verify the cached Ring login works: list devices, fetch one snapshot from each, "
+            "save them as JPEGs in the current directory, then exit"
+        ),
+    )
+    parser.add_argument(
         "--robot-name",
         type=str,
         default=None,
