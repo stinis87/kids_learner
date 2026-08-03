@@ -33,9 +33,14 @@ class RingHistory(Tool):
         "little while) and requires an active Ring Protect subscription. Before calling "
         "with describe_event set, briefly tell the user you're checking and it might take "
         "a moment — do not do this for a plain count/summary lookup, which is fast enough "
-        "to answer right away. Works no matter what language the user asks in — e.g. "
-        "Norwegian 'hage' means garden, 'framsiden' means front door, and 'i dag'/'i går'/"
-        "'i forgårs' mean today/yesterday/day before yesterday."
+        "to answer right away. When frames come back, they are sequential snapshots from "
+        "the same clip, in order — compare them to spot what changed between them rather "
+        "than just describing the static scene (grass, fence, etc.), and use that "
+        "difference to guess at the actual event: is a person walking through, and doing "
+        "what? A car passing or parking? A delivery? An animal? Report your best guess at "
+        "what happened, not a list of background objects. Works no matter what language "
+        "the user asks in — e.g. Norwegian 'hage' means garden, 'framsiden' means front "
+        "door, and 'i dag'/'i går'/'i forgårs' mean today/yesterday/day before yesterday."
     )
     parameters_schema = {
         "type": "object",
@@ -109,6 +114,11 @@ class RingHistory(Tool):
             images, description_error = await self._describe_event(deps, location, day, describe_event)
             if images is not None:
                 result["images"] = images
+                result["interpretation_hint"] = (
+                    "These frames are in chronological order from one clip. Compare them to see "
+                    "what changed and infer the actual event (a person doing something, a car "
+                    "passing, a delivery, an animal, etc.) rather than describing the static scene."
+                )
             elif description_error is not None:
                 result["description_error"] = description_error
 

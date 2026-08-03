@@ -139,6 +139,7 @@ async def test_describe_event_attaches_frames_when_requested() -> None:
 
     assert len(result["images"]) == 2
     assert all("b64_im" in image for image in result["images"])
+    assert "interpretation_hint" in result
     ring_client.async_describe_event.assert_awaited_once_with("garden", "today", "latest")
 
 
