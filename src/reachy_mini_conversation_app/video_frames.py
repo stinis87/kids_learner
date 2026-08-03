@@ -24,6 +24,11 @@ FFPROBE_BINARY = "ffprobe"
 # frame sampling still spreads out across a plausible clip length rather than bunching.
 _FALLBACK_DURATION_S = 30.0
 
+# Trim this fraction of the clip's duration off each end before sampling, since Ring
+# clips often start/end with a blank or empty pre-/post-roll — the subject is more
+# likely to be visible somewhere in the middle.
+_EDGE_TRIM_FRACTION = 0.15
+
 
 class FfmpegNotAvailableError(Exception):
     """Raised when the `ffmpeg`/`ffprobe` binaries aren't installed."""
@@ -43,16 +48,30 @@ async def async_extract_evenly_spaced_frames(video_bytes: bytes, frame_count: in
 
         duration_s = await _probe_duration_seconds(video_path)
         frames: list[bytes] = []
-        for index in range(frame_count):
-            # Sample at each segment's midpoint rather than its edge, so the first and
-            # last frames aren't the clip's often-blank very start/end.
-            timestamp_s = duration_s * (index + 0.5) / frame_count
-            frame_path = tmp_dir / f"frame_{index}.jpg"
+        for timestamp_s in _sample_timestamps(duration_s, frame_count):
+            frame_path = tmp_dir / f"frame_{len(frames)}.jpg"
             await _run_ffmpeg(video_path, timestamp_s, frame_path)
             if frame_path.exists():
                 frames.append(frame_path.read_bytes())
 
         return frames
+
+
+def _sample_timestamps(duration_s: float, frame_count: int) -> list[float]:
+    """Return `frame_count` timestamps spread evenly across the clip's middle portion.
+
+    Trimming both ends avoids near-duplicate frames clustered around a blank
+    start/end, and keeps consecutive samples far enough apart in time that they
+    won't look identical for a slow-moving subject.
+    """
+    if frame_count <= 0:
+        return []
+    trim_s = duration_s * _EDGE_TRIM_FRACTION
+    window_start, window_end = trim_s, max(duration_s - trim_s, trim_s)
+    if frame_count == 1:
+        return [(window_start + window_end) / 2]
+    step = (window_end - window_start) / (frame_count - 1)
+    return [window_start + step * index for index in range(frame_count)]
 
 
 async def _probe_duration_seconds(video_path: Path) -> float:

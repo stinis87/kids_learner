@@ -119,9 +119,10 @@ _HISTORY_DAY_MAX_PAGES = 20
 # transfer; a longer timeout than the on-demand snapshot endpoint's.
 _RECORDING_DOWNLOAD_TIMEOUT_S = 60
 
-# Frames to sample across a described clip's duration — enough to catch a subject
-# who doesn't stay in one spot, without the cost of decoding every frame.
-_DESCRIBE_FRAME_COUNT = 4
+# Frames to sample across a described clip's duration. Kept low since each frame is
+# sent to the model as a separate image alongside the tool result, and local backends
+# (e.g. llama-server) can stall or take a very long time when given several images at once.
+_DESCRIBE_FRAME_COUNT = 2
 
 _DAY_ALIASES = {
     "today": 0,
