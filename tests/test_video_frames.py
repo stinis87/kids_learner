@@ -1,8 +1,38 @@
 """Tests for the ffmpeg-based frame sampling used to describe Ring recordings."""
 
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
-from reachy_mini_conversation_app.video_frames import _sample_timestamps
+from reachy_mini_conversation_app.video_frames import _resolve_binary, _sample_timestamps
+
+
+def test_resolve_binary_prefers_path_lookup() -> None:
+    """A binary found on PATH is used as-is, without checking fallback directories."""
+    with patch("shutil.which", return_value="/usr/bin/ffmpeg"):
+        assert _resolve_binary("ffmpeg") == "/usr/bin/ffmpeg"
+
+
+def test_resolve_binary_falls_back_to_common_install_dirs(tmp_path: Path) -> None:
+    """When PATH lookup fails, well-known package-manager directories are checked."""
+    fallback_binary = tmp_path / "ffmpeg"
+    fallback_binary.write_text("#!/bin/sh\n")
+
+    with (
+        patch("shutil.which", return_value=None),
+        patch("reachy_mini_conversation_app.video_frames._FALLBACK_BINARY_DIRS", (str(tmp_path),)),
+    ):
+        assert _resolve_binary("ffmpeg") == str(fallback_binary)
+
+
+def test_resolve_binary_returns_none_when_nowhere_found(tmp_path: Path) -> None:
+    """Returns None rather than raising when the binary truly isn't installed."""
+    with (
+        patch("shutil.which", return_value=None),
+        patch("reachy_mini_conversation_app.video_frames._FALLBACK_BINARY_DIRS", (str(tmp_path),)),
+    ):
+        assert _resolve_binary("ffmpeg") is None
 
 
 def test_sample_timestamps_returns_empty_for_zero_frames() -> None:

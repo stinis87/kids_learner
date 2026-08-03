@@ -20,6 +20,25 @@ logger = logging.getLogger(__name__)
 FFMPEG_BINARY = "ffmpeg"
 FFPROBE_BINARY = "ffprobe"
 
+# Fallback install directories to check when the binaries aren't found on PATH.
+# Apps launched by a daemon/manager process (rather than an interactive shell)
+# often don't inherit PATH entries that a shell rc file (e.g. .zshrc) adds, so a
+# Homebrew install can be present yet invisible to `shutil.which`.
+_FALLBACK_BINARY_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
+
+
+def _resolve_binary(name: str) -> str | None:
+    """Return the path to `name`, checking PATH first and then common install dirs."""
+    found = shutil.which(name)
+    if found is not None:
+        return found
+    for directory in _FALLBACK_BINARY_DIRS:
+        candidate = Path(directory) / name
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 # Ring clips are typically 30-60s; used only if ffprobe can't report a duration, so
 # frame sampling still spreads out across a plausible clip length rather than bunching.
 _FALLBACK_DURATION_S = 30.0
@@ -36,7 +55,9 @@ class FfmpegNotAvailableError(Exception):
 
 async def async_extract_evenly_spaced_frames(video_bytes: bytes, frame_count: int) -> list[bytes]:
     """Return up to `frame_count` JPEG frames sampled at even intervals across `video_bytes`."""
-    if shutil.which(FFMPEG_BINARY) is None or shutil.which(FFPROBE_BINARY) is None:
+    ffmpeg_path = _resolve_binary(FFMPEG_BINARY)
+    ffprobe_path = _resolve_binary(FFPROBE_BINARY)
+    if ffmpeg_path is None or ffprobe_path is None:
         raise FfmpegNotAvailableError(
             "ffmpeg/ffprobe are not installed; required to extract frames from Ring recordings."
         )
@@ -46,11 +67,11 @@ async def async_extract_evenly_spaced_frames(video_bytes: bytes, frame_count: in
         video_path = tmp_dir / "clip.mp4"
         video_path.write_bytes(video_bytes)
 
-        duration_s = await _probe_duration_seconds(video_path)
+        duration_s = await _probe_duration_seconds(ffprobe_path, video_path)
         frames: list[bytes] = []
         for timestamp_s in _sample_timestamps(duration_s, frame_count):
             frame_path = tmp_dir / f"frame_{len(frames)}.jpg"
-            await _run_ffmpeg(video_path, timestamp_s, frame_path)
+            await _run_ffmpeg(ffmpeg_path, video_path, timestamp_s, frame_path)
             if frame_path.exists():
                 frames.append(frame_path.read_bytes())
 
@@ -74,10 +95,10 @@ def _sample_timestamps(duration_s: float, frame_count: int) -> list[float]:
     return [window_start + step * index for index in range(frame_count)]
 
 
-async def _probe_duration_seconds(video_path: Path) -> float:
+async def _probe_duration_seconds(ffprobe_path: str, video_path: Path) -> float:
     """Return the clip's duration in seconds, falling back to a typical clip length on failure."""
     process = await asyncio.create_subprocess_exec(
-        FFPROBE_BINARY,
+        ffprobe_path,
         "-v",
         "error",
         "-show_entries",
@@ -98,10 +119,10 @@ async def _probe_duration_seconds(video_path: Path) -> float:
         return _FALLBACK_DURATION_S
 
 
-async def _run_ffmpeg(video_path: Path, timestamp_s: float, frame_path: Path) -> None:
+async def _run_ffmpeg(ffmpeg_path: str, video_path: Path, timestamp_s: float, frame_path: Path) -> None:
     """Extract a single JPEG frame at `timestamp_s` into `frame_path`."""
     process = await asyncio.create_subprocess_exec(
-        FFMPEG_BINARY,
+        ffmpeg_path,
         "-ss",
         f"{timestamp_s:.2f}",
         "-i",
