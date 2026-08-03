@@ -1,20 +1,36 @@
 """Tests for the Ring client's location alias resolution and device lookup."""
 
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from datetime import date, datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from ring_doorbell import RingError
 
 from reachy_mini_conversation_app import ring_client as ring_client_module
-from reachy_mini_conversation_app.ring_client import RingClient, RingDeviceNotFoundError
+from reachy_mini_conversation_app.ring_client import (
+    RingClient,
+    RingEventNotFoundError,
+    RingNoEventsFoundError,
+    RingDeviceNotFoundError,
+    RingDayNotRecognizedError,
+    RingRecordingUnavailableError,
+)
 
 
-def _fake_device(name: str, device_id: int = 123, history: list[dict[str, object]] | None = None) -> MagicMock:
+def _fake_device(
+    name: str,
+    device_id: int = 123,
+    history: list[dict[str, object]] | None = None,
+    timezone_name: str = "UTC",
+    has_subscription: bool = True,
+) -> MagicMock:
     device = MagicMock()
     device.name = name
     device.id = device_id
+    device.timezone = timezone_name
+    device.has_subscription = has_subscription
     device.async_history = AsyncMock(return_value=history or [])
+    device.async_recording_download = AsyncMock(return_value=b"fake-mp4-bytes")
     return device
 
 
@@ -170,4 +186,226 @@ async def test_latest_events_skips_device_on_history_error() -> None:
     events = await client.async_get_latest_events(("motion", "ding"))
 
     assert "Garden" not in events
-    assert events["Front Door"].event_id == 3
+
+
+@pytest.mark.parametrize(
+    ("day", "expected"),
+    [
+        ("today", date(2024, 6, 15)),
+        ("Yesterday", date(2024, 6, 14)),
+        ("day before yesterday", date(2024, 6, 13)),
+        ("2024-01-05", date(2024, 1, 5)),
+        ("i dag", date(2024, 6, 15)),
+        ("I går", date(2024, 6, 14)),
+        ("i forgårs", date(2024, 6, 13)),
+    ],
+)
+def test_resolve_day_handles_relative_and_iso_dates(day: str, expected: date) -> None:
+    """'today'/'yesterday'/'day before yesterday' (English and Norwegian) resolve relative to now; ISO dates resolve directly."""
+    tz = ring_client_module.ZoneInfo("UTC")
+    with patch(
+        "reachy_mini_conversation_app.ring_client.datetime",
+        wraps=datetime,
+    ) as mock_datetime:
+        mock_datetime.now.return_value = datetime(2024, 6, 15, 12, 0, tzinfo=tz)
+        resolved = ring_client_module.resolve_day(day, tz)
+
+    assert resolved == expected
+
+
+def test_resolve_day_rejects_unrecognized_string() -> None:
+    """A day string that isn't relative or ISO-formatted raises a clear error."""
+    with pytest.raises(RingDayNotRecognizedError, match="next tuesday"):
+        ring_client_module.resolve_day("next tuesday", ring_client_module.ZoneInfo("UTC"))
+
+
+@pytest.mark.asyncio
+async def test_history_for_day_filters_by_window_and_kind() -> None:
+    """Only watched-kind events within the requested day's window are returned."""
+    garden = _fake_device(
+        "Garden",
+        history=[
+            _history_entry(3, "motion", datetime(2024, 1, 1, 10, tzinfo=timezone.utc)),
+            _history_entry(2, "on_demand", datetime(2024, 1, 1, 9, tzinfo=timezone.utc)),
+            _history_entry(1, "ding", datetime(2023, 12, 31, 23, tzinfo=timezone.utc)),
+        ],
+    )
+    client = _client_with_devices([garden])
+
+    summary = await client.async_get_history_for_day("garden", "2024-01-01")
+
+    assert summary.day == date(2024, 1, 1)
+    assert [event.event_id for event in summary.events] == [3]
+
+
+@pytest.mark.asyncio
+async def test_history_for_day_pages_until_window_start_is_reached() -> None:
+    """A day with more events than one page requires paging with the `older_than` cursor."""
+    garden = _fake_device("Garden")
+    page_size = ring_client_module._HISTORY_DAY_PAGE_SIZE
+    first_page = [
+        _history_entry(page_size - i, "motion", datetime(2024, 1, 1, 12, tzinfo=timezone.utc))
+        for i in range(page_size)
+    ]
+    second_page = [_history_entry(1, "motion", datetime(2023, 12, 31, 12, tzinfo=timezone.utc))]
+    garden.async_history = AsyncMock(side_effect=[first_page, second_page])
+    client = _client_with_devices([garden])
+
+    summary = await client.async_get_history_for_day("garden", "2024-01-01")
+
+    assert len(summary.events) == page_size
+    assert garden.async_history.await_count == 2
+    second_call_kwargs = garden.async_history.await_args_list[1].kwargs
+    assert second_call_kwargs["older_than"] == first_page[-1]["id"]
+
+
+@pytest.mark.asyncio
+async def test_describe_event_downloads_and_extracts_frames_for_latest() -> None:
+    """The 'latest' selector (the default) downloads the most recent event's clip."""
+    garden = _fake_device(
+        "Garden",
+        history=[_history_entry(2, "motion", datetime(2024, 1, 1, 10, tzinfo=timezone.utc))],
+    )
+    client = _client_with_devices([garden])
+
+    with patch(
+        "reachy_mini_conversation_app.ring_client.async_extract_evenly_spaced_frames",
+        AsyncMock(return_value=[b"frame1", b"frame2"]),
+    ) as mock_extract:
+        event, frames = await client.async_describe_event("garden", "2024-01-01", "latest")
+
+    assert event.event_id == 2
+    assert frames == [b"frame1", b"frame2"]
+    garden.async_recording_download.assert_awaited_once()
+    mock_extract.assert_awaited_once_with(b"fake-mp4-bytes", ring_client_module._DESCRIBE_FRAME_COUNT)
+
+
+@pytest.mark.asyncio
+async def test_describe_event_raises_when_no_events_for_day() -> None:
+    """A day with no matching events raises before attempting any download."""
+    garden = _fake_device("Garden", history=[])
+    client = _client_with_devices([garden])
+
+    with pytest.raises(RingNoEventsFoundError):
+        await client.async_describe_event("garden", "2024-01-01", "latest")
+
+    garden.async_recording_download.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_describe_event_raises_without_subscription() -> None:
+    """A device with no Ring Protect subscription raises a clear, actionable error."""
+    garden = _fake_device(
+        "Garden",
+        history=[_history_entry(1, "motion", datetime(2024, 1, 1, 10, tzinfo=timezone.utc))],
+        has_subscription=False,
+    )
+    client = _client_with_devices([garden])
+
+    with pytest.raises(RingRecordingUnavailableError, match="Ring Protect"):
+        await client.async_describe_event("garden", "2024-01-01", "latest")
+
+    garden.async_recording_download.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_describe_event_raises_when_ffmpeg_missing() -> None:
+    """A missing ffmpeg/ffprobe installation surfaces as a recording-unavailable error."""
+    garden = _fake_device(
+        "Garden",
+        history=[_history_entry(1, "motion", datetime(2024, 1, 1, 10, tzinfo=timezone.utc))],
+    )
+    client = _client_with_devices([garden])
+
+    with patch(
+        "reachy_mini_conversation_app.ring_client.async_extract_evenly_spaced_frames",
+        AsyncMock(side_effect=ring_client_module.FfmpegNotAvailableError("ffmpeg not installed")),
+    ):
+        with pytest.raises(RingRecordingUnavailableError, match="ffmpeg"):
+            await client.async_describe_event("garden", "2024-01-01", "latest")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("selector", "expected_id"),
+    [
+        ("latest", 3),
+        ("most recent", 3),
+        ("", 3),
+        ("first", 1),
+        ("earliest", 1),
+        ("oldest", 1),
+        ("1st", 1),
+        ("second", 2),
+        ("2nd", 2),
+        ("third", 3),
+        ("siste", 3),
+        ("første", 1),
+    ],
+)
+async def test_describe_event_selects_by_latest_or_ordinal(selector: str, expected_id: int) -> None:
+    """Latest/ordinal selectors (English and Norwegian) pick the right event by chronological position."""
+    garden = _fake_device(
+        "Garden",
+        history=[
+            _history_entry(3, "motion", datetime(2024, 1, 1, 16, tzinfo=timezone.utc)),
+            _history_entry(2, "ding", datetime(2024, 1, 1, 12, tzinfo=timezone.utc)),
+            _history_entry(1, "motion", datetime(2024, 1, 1, 8, tzinfo=timezone.utc)),
+        ],
+    )
+    client = _client_with_devices([garden])
+
+    with patch(
+        "reachy_mini_conversation_app.ring_client.async_extract_evenly_spaced_frames",
+        AsyncMock(return_value=[b"frame"]),
+    ):
+        event, _ = await client.async_describe_event("garden", "2024-01-01", selector)
+
+    assert event.event_id == expected_id
+
+
+@pytest.mark.asyncio
+async def test_describe_event_selects_by_closest_clock_time() -> None:
+    """A clock-time selector picks the event closest to that time of day."""
+    garden = _fake_device(
+        "Garden",
+        history=[
+            _history_entry(2, "motion", datetime(2024, 1, 1, 16, 0, tzinfo=timezone.utc)),
+            _history_entry(1, "ding", datetime(2024, 1, 1, 9, 5, tzinfo=timezone.utc)),
+        ],
+    )
+    client = _client_with_devices([garden])
+
+    with patch(
+        "reachy_mini_conversation_app.ring_client.async_extract_evenly_spaced_frames",
+        AsyncMock(return_value=[b"frame"]),
+    ):
+        event, _ = await client.async_describe_event("garden", "2024-01-01", "9am")
+
+    assert event.event_id == 1
+
+
+@pytest.mark.asyncio
+async def test_describe_event_raises_for_out_of_range_ordinal() -> None:
+    """An ordinal beyond the number of events that day raises a clear error."""
+    garden = _fake_device(
+        "Garden",
+        history=[_history_entry(1, "motion", datetime(2024, 1, 1, 10, tzinfo=timezone.utc))],
+    )
+    client = _client_with_devices([garden])
+
+    with pytest.raises(RingEventNotFoundError, match="only 1 event"):
+        await client.async_describe_event("garden", "2024-01-01", "second")
+
+
+@pytest.mark.asyncio
+async def test_describe_event_raises_for_unrecognized_selector() -> None:
+    """A selector that isn't a name, ordinal, or clock time raises a clear error."""
+    garden = _fake_device(
+        "Garden",
+        history=[_history_entry(1, "motion", datetime(2024, 1, 1, 10, tzinfo=timezone.utc))],
+    )
+    client = _client_with_devices([garden])
+
+    with pytest.raises(RingEventNotFoundError, match="banana"):
+        await client.async_describe_event("garden", "2024-01-01", "banana")

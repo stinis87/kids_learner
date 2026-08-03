@@ -19,16 +19,12 @@ from pathlib import Path
 from dataclasses import dataclass
 from collections.abc import Callable, Awaitable
 
-from reachy_mini_conversation_app.ring_client import RingClient
+from reachy_mini_conversation_app.ring_client import WATCHED_HISTORY_KINDS, RingClient
 
 
 logger = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "ring_watcher.txt"
-
-# Which Ring history "kind" values are worth reacting to. "on_demand" (someone
-# opened a live view/snapshot in the Ring app) is deliberately excluded.
-_WATCHED_KINDS = ("motion", "ding")
 
 _NUDGE_TEMPLATES = {
     "ding": "(Someone just rang the doorbell at {device} — look and react.)",
@@ -150,7 +146,7 @@ class RingWatcherEngine:
                 logger.warning("Ring watcher poll failed: %s", e)
 
     async def _poll_once(self) -> None:
-        events = await self._ring_client.async_get_latest_events(_WATCHED_KINDS)
+        events = await self._ring_client.async_get_latest_events(WATCHED_HISTORY_KINDS)
         logger.debug("Ring watcher: polled %d device(s)", len(events))
 
         now = time.monotonic()
