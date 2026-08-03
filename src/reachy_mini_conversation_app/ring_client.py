@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from collections.abc import Sequence
 
+import httpx
 from ring_doorbell import Auth, Ring, RingError, AuthenticationError
 from ring_doorbell.doorbot import RingDoorBell
 
@@ -305,6 +306,32 @@ async def _get_snapshot_with_retry(ring: Ring, device: RingDoorBell) -> bytes:
     ) from last_error
 
 
+async def _download_recording(device: RingDoorBell, event_id: int) -> bytes | None:
+    """Download a recording's video bytes.
+
+    Falls back to the CDN "share" URL when the direct download 404s — some Ring
+    devices/plans don't expose recordings through the primary download endpoint
+    even with an active subscription, but do through the same share-link path
+    the Ring app itself uses to let you send a clip to someone.
+    """
+    try:
+        return await device.async_recording_download(event_id, timeout=_RECORDING_DOWNLOAD_TIMEOUT_S)
+    except RingError as e:
+        if "404" not in str(e):
+            raise
+
+    share_url = await device.async_recording_url(event_id)
+    if not share_url:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=_RECORDING_DOWNLOAD_TIMEOUT_S) as client:
+            response = await client.get(share_url)
+            response.raise_for_status()
+            return response.content
+    except httpx.HTTPError as e:
+        raise RingError(f"Could not download recording via share URL: {e}") from e
+
+
 def _match_device(video_devices: Sequence[RingDoorBell], location: str) -> RingDoorBell:
     """Return the video device whose name matches `location`, applying `LOCATION_ALIASES`."""
     normalized_location = location.strip().casefold()
@@ -446,7 +473,7 @@ class RingClient:
             )
 
         try:
-            video_bytes = await device.async_recording_download(event.event_id, timeout=_RECORDING_DOWNLOAD_TIMEOUT_S)
+            video_bytes = await _download_recording(device, event.event_id)
         except RingError as e:
             raise RingRecordingUnavailableError(f"Could not download the recording for '{device.name}': {e}") from e
         if not video_bytes:

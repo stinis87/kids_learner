@@ -31,6 +31,7 @@ def _fake_device(
     device.has_subscription = has_subscription
     device.async_history = AsyncMock(return_value=history or [])
     device.async_recording_download = AsyncMock(return_value=b"fake-mp4-bytes")
+    device.async_recording_url = AsyncMock(return_value=None)
     return device
 
 
@@ -278,6 +279,73 @@ async def test_describe_event_downloads_and_extracts_frames_for_latest() -> None
     assert frames == [b"frame1", b"frame2"]
     garden.async_recording_download.assert_awaited_once()
     mock_extract.assert_awaited_once_with(b"fake-mp4-bytes", ring_client_module._DESCRIBE_FRAME_COUNT)
+
+
+@pytest.mark.asyncio
+async def test_describe_event_falls_back_to_share_url_on_404() -> None:
+    """A 404 from the primary download endpoint falls back to the CDN share URL."""
+    garden = _fake_device(
+        "Garden",
+        history=[_history_entry(2, "motion", datetime(2024, 1, 1, 10, tzinfo=timezone.utc))],
+    )
+    garden.async_recording_download = AsyncMock(
+        side_effect=RingError("HTTP error with status code 404 during query of url ...: 404, message='Not Found'")
+    )
+    garden.async_recording_url = AsyncMock(return_value="https://cdn.ring.com/signed-clip.mp4")
+    client = _client_with_devices([garden])
+
+    fake_response = MagicMock()
+    fake_response.content = b"fake-mp4-bytes"
+    fake_response.raise_for_status = MagicMock()
+    fake_http_client = AsyncMock()
+    fake_http_client.get = AsyncMock(return_value=fake_response)
+    fake_http_client.__aenter__ = AsyncMock(return_value=fake_http_client)
+    fake_http_client.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch(
+            "reachy_mini_conversation_app.ring_client.async_extract_evenly_spaced_frames",
+            AsyncMock(return_value=[b"frame1"]),
+        ),
+        patch("httpx.AsyncClient", return_value=fake_http_client),
+    ):
+        event, frames = await client.async_describe_event("garden", "2024-01-01", "latest")
+
+    assert event.event_id == 2
+    assert frames == [b"frame1"]
+    garden.async_recording_url.assert_awaited_once_with(2)
+    fake_http_client.get.assert_awaited_once_with("https://cdn.ring.com/signed-clip.mp4")
+
+
+@pytest.mark.asyncio
+async def test_describe_event_raises_when_share_url_fallback_also_unavailable() -> None:
+    """A 404 with no share URL available surfaces as a recording-unavailable error."""
+    garden = _fake_device(
+        "Garden",
+        history=[_history_entry(2, "motion", datetime(2024, 1, 1, 10, tzinfo=timezone.utc))],
+    )
+    garden.async_recording_download = AsyncMock(side_effect=RingError("status code 404"))
+    garden.async_recording_url = AsyncMock(return_value=None)
+    client = _client_with_devices([garden])
+
+    with pytest.raises(RingRecordingUnavailableError):
+        await client.async_describe_event("garden", "2024-01-01", "latest")
+
+
+@pytest.mark.asyncio
+async def test_describe_event_reraises_non_404_download_errors() -> None:
+    """Non-404 download errors propagate as-is rather than attempting the share-url fallback."""
+    garden = _fake_device(
+        "Garden",
+        history=[_history_entry(2, "motion", datetime(2024, 1, 1, 10, tzinfo=timezone.utc))],
+    )
+    garden.async_recording_download = AsyncMock(side_effect=RingError("status code 500"))
+    client = _client_with_devices([garden])
+
+    with pytest.raises(RingRecordingUnavailableError):
+        await client.async_describe_event("garden", "2024-01-01", "latest")
+
+    garden.async_recording_url.assert_not_called()
 
 
 @pytest.mark.asyncio
