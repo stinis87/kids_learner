@@ -49,6 +49,8 @@ class ToolDependencies:
     go_to_sleep: Callable[[], dict[str, Any]] | None = None
     apply_personality: Callable[[str | None], Awaitable[str]] | None = None
     ring_client: "RingClient | None" = None
+    start_door_call: Callable[[str], Awaitable[dict[str, Any]]] | None = None
+    end_door_call: Callable[[], Awaitable[dict[str, Any]]] | None = None
 
 
 class ToolSpec(TypedDict):

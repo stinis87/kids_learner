@@ -7,3 +7,16 @@
 # Set `enabled=false` to opt this profile out entirely.
 poll_interval_seconds=20
 device_cooldown_seconds=120
+
+# door_call_mode controls how a doorbell "ding" is handled (motion events are
+# unaffected and always just get a spoken nudge):
+#   ask  (default) - Reachy asks out loud whether it should answer the door
+#                    itself or let the person nearby talk, then opens a live
+#                    two-way audio call accordingly using talk_to_door.
+#   auto           - opens the live call immediately, no question asked, so
+#                    Reachy answers the door fully on its own.
+#   off            - back to a snapshot-only nudge, no call ever offered.
+# A live call requires a device with a speaker/mic (most video doorbells/
+# battery cams qualify) and the `aiortc` dependency.
+door_call_mode=ask
+

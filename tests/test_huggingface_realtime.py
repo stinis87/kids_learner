@@ -1,4 +1,5 @@
 import time
+import base64
 import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -496,3 +497,139 @@ async def test_inject_tool_images_sends_one_input_image_per_entry() -> None:
     assert handler.connection.conversation.item.create.await_count == 1
     sent_item = handler.connection.conversation.item.create.await_args.kwargs["item"]
     assert sent_item["content"][0]["image_url"] == "data:image/jpeg;base64,aaaa"
+
+
+class _FakeDoorCallSession:
+    """A minimal RingCallSession stand-in with an immediately-exhausted inbound stream."""
+
+    def __init__(self) -> None:
+        self.started = False
+        self.closed = False
+        self.sent_audio: list[np.ndarray] = []
+
+    async def start(self) -> None:
+        self.started = True
+
+    def send_audio(self, pcm: np.ndarray) -> None:
+        self.sent_audio.append(pcm)
+
+    async def receive_audio(self):  # noqa: ANN201 - mirrors RingCallSession's async generator signature
+        return
+        yield  # pragma: no cover - makes this an async generator with no items
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _door_call_deps(ring_client: Any) -> ToolDependencies:
+    return ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock(), ring_client=ring_client)
+
+
+@pytest.mark.asyncio
+async def test_start_door_call_returns_error_when_ring_not_configured() -> None:
+    """Opening a doorbell call without a configured ring_client returns an error."""
+    handler = HuggingFaceRealtimeHandler(_door_call_deps(None))
+
+    result = await handler.start_door_call("Front Door")
+
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_start_door_call_opens_a_session_and_nudges_the_model(monkeypatch: Any) -> None:
+    """A resolved device opens a RingCallSession and queues a text-only nudge about the call."""
+    fake_session = _FakeDoorCallSession()
+    monkeypatch.setattr(hf_mod, "RingCallSession", lambda device: fake_session)
+
+    device = MagicMock()
+    device.name = "Front Door"
+    ring_client = MagicMock()
+    ring_client.async_get_call_device = AsyncMock(return_value=device)
+
+    handler = HuggingFaceRealtimeHandler(_door_call_deps(ring_client))
+    handler.connection = AsyncMock()
+
+    result = await handler.start_door_call("Front Door")
+
+    assert result == {"status": "connected", "location": "Front Door"}
+    assert fake_session.started
+    assert handler._door_call is fake_session
+    handler.connection.conversation.item.create.assert_awaited_once()
+
+    await handler.end_door_call()
+
+
+@pytest.mark.asyncio
+async def test_start_door_call_rejects_a_second_call_while_one_is_active(monkeypatch: Any) -> None:
+    """Starting a call while already on one is rejected instead of dropping the first call."""
+    monkeypatch.setattr(hf_mod, "RingCallSession", lambda device: _FakeDoorCallSession())
+
+    device = MagicMock()
+    device.name = "Front Door"
+    ring_client = MagicMock()
+    ring_client.async_get_call_device = AsyncMock(return_value=device)
+
+    handler = HuggingFaceRealtimeHandler(_door_call_deps(ring_client))
+    handler.connection = AsyncMock()
+    await handler.start_door_call("Front Door")
+
+    result = await handler.start_door_call("Garden")
+
+    assert "error" in result
+
+    await handler.end_door_call()
+
+
+@pytest.mark.asyncio
+async def test_end_door_call_returns_error_when_no_active_call() -> None:
+    """Hanging up with no active call returns an error instead of raising."""
+    handler = HuggingFaceRealtimeHandler(_door_call_deps(None))
+
+    result = await handler.end_door_call()
+
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_end_door_call_closes_the_session_and_clears_state(monkeypatch: Any) -> None:
+    """Hanging up closes the RingCallSession and clears the handler's call state."""
+    fake_session = _FakeDoorCallSession()
+    monkeypatch.setattr(hf_mod, "RingCallSession", lambda device: fake_session)
+
+    device = MagicMock()
+    device.name = "Front Door"
+    ring_client = MagicMock()
+    ring_client.async_get_call_device = AsyncMock(return_value=device)
+
+    handler = HuggingFaceRealtimeHandler(_door_call_deps(ring_client))
+    handler.connection = AsyncMock()
+    await handler.start_door_call("Front Door")
+
+    result = await handler.end_door_call()
+
+    assert result == {"status": "ended", "location": "Front Door"}
+    assert fake_session.closed
+    assert handler._door_call is None
+
+
+@pytest.mark.asyncio
+async def test_assistant_audio_delta_is_forwarded_to_an_active_door_call(monkeypatch: Any) -> None:
+    """The realtime event loop pushes assistant audio deltas into an active door call's outbound track."""
+    monkeypatch.setattr(hf_mod, "get_session_instructions", lambda _instance_path=None: "test")
+    monkeypatch.setattr(hf_mod, "get_session_voice", lambda default=HF_DEFAULT_VOICE: "Aiden")
+    monkeypatch.setattr(hf_mod, "get_tool_specs", lambda: [])
+
+    pcm_bytes = np.zeros(320, dtype=np.int16).tobytes()
+    delta_b64 = base64.b64encode(pcm_bytes).decode("utf-8")
+
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler.client = _make_fake_realtime_client(events=(_FakeEvent("response.output_audio.delta", delta=delta_b64),))
+    monkeypatch.setattr(type(handler.tool_manager), "start_up", MagicMock())
+    monkeypatch.setattr(type(handler.tool_manager), "shutdown", AsyncMock())
+
+    fake_session = _FakeDoorCallSession()
+    handler._door_call = fake_session
+
+    await handler._run_realtime_session()
+
+    assert len(fake_session.sent_audio) == 1

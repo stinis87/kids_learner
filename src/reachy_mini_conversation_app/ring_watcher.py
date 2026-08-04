@@ -8,6 +8,13 @@ device's event history on an interval and, when a genuinely new motion or
 doorbell event appears, fetches a fresh snapshot and prompts the model to
 react — the same "inject an image, let the model respond freely" pattern used
 by :class:`reachy_mini_conversation_app.proactive_vision.ProactiveVisionEngine`.
+
+A profile can additionally set ``door_call_mode`` to change how a doorbell
+"ding" is handled: ``ask`` (the default) has Reachy ask out loud whether it
+should answer itself or let the person nearby talk, ``auto`` opens a live
+two-way audio call (see :mod:`reachy_mini_conversation_app.ring_call`)
+straight away with no question asked, and ``off`` keeps the original
+snapshot-only nudge with no call offered.
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ import time
 import base64
 import asyncio
 import logging
+from typing import Literal
 from pathlib import Path
 from dataclasses import dataclass
 from collections.abc import Callable, Awaitable
@@ -30,6 +38,20 @@ _NUDGE_TEMPLATES = {
     "ding": "(Someone just rang the doorbell at {device} — look and react.)",
     "motion": "(Motion was just detected at {device} — look and react.)",
 }
+
+# Sent instead of the plain "ding" nudge above when door_call_mode="ask": asks
+# the user out loud and lets the model act on the answer with the existing
+# talk_to_door/end_door_call tools, rather than deciding anything on its own.
+_DOOR_CALL_ASK_TEMPLATE = (
+    "(Someone just rang the doorbell at {device}. Ask out loud whether you should answer the "
+    "door yourself or whether they'd rather talk to the visitor themselves. If they want you to "
+    'handle it, call talk_to_door with location="{device}" and carry the conversation with the '
+    "visitor on your own. If they'd rather talk themselves, call talk_to_door with the same "
+    "location so their voice reaches the visitor, then let the conversation follow their lead. "
+    "If they say to ignore it, don't open a call. Call end_door_call once it's over.)"
+)
+
+DOOR_CALL_MODES = ("off", "ask", "auto")
 
 # A physical reaction to play immediately when a new event comes in, before the
 # model has even started forming a spoken response — makes the reaction feel
@@ -51,6 +73,7 @@ class RingWatcherConfig:
 
     poll_interval_seconds: float = 20.0
     device_cooldown_seconds: float = 120.0
+    door_call_mode: Literal["off", "ask", "auto"] = "ask"
 
 
 def load_config(profile_dir: Path) -> RingWatcherConfig | None:
@@ -60,6 +83,7 @@ def load_config(profile_dir: Path) -> RingWatcherConfig | None:
         return RingWatcherConfig()
 
     enabled = True
+    door_call_mode = RingWatcherConfig().door_call_mode
     values: dict[str, float] = {}
     try:
         for line in config_file.read_text(encoding="utf-8").splitlines():
@@ -71,6 +95,13 @@ def load_config(profile_dir: Path) -> RingWatcherConfig | None:
             raw_value = raw_value.strip()
             if key == "enabled":
                 enabled = raw_value.lower() not in ("false", "0", "no")
+                continue
+            if key == "door_call_mode":
+                normalized = raw_value.lower()
+                if normalized in DOOR_CALL_MODES:
+                    door_call_mode = normalized  # type: ignore[assignment]
+                else:
+                    logger.warning("Ignoring unknown door_call_mode value: %r", raw_value)
                 continue
             try:
                 values[key] = float(raw_value)
@@ -87,6 +118,7 @@ def load_config(profile_dir: Path) -> RingWatcherConfig | None:
     return RingWatcherConfig(
         poll_interval_seconds=values.get("poll_interval_seconds", defaults.poll_interval_seconds),
         device_cooldown_seconds=values.get("device_cooldown_seconds", defaults.device_cooldown_seconds),
+        door_call_mode=door_call_mode,
     )
 
 
@@ -101,13 +133,20 @@ class RingWatcherEngine:
         is_ready: Callable[[], bool],
         send_prompt: Callable[[str, str], Awaitable[None]],
         play_emotion: Callable[[str], Awaitable[None]] | None = None,
+        answer_ding: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
-        """Store collaborators; nothing runs until :meth:`start`."""
+        """Store collaborators; nothing runs until :meth:`start`.
+
+        `answer_ding` is called instead of `send_prompt` for "ding" events when
+        `config.door_call_mode == "auto"` — it's expected to open a live doorbell
+        call rather than just nudge the model with a snapshot.
+        """
         self._config = config
         self._ring_client = ring_client
         self._is_ready = is_ready
         self._send_prompt = send_prompt
         self._play_emotion = play_emotion
+        self._answer_ding = answer_ding
         self._task: asyncio.Task[None] | None = None
         self._last_event_ids: dict[str, int] = {}
         self._last_reacted_at: dict[str, float] = {}
@@ -188,12 +227,6 @@ class RingWatcherEngine:
                 "Ring watcher: reacting to new '%s' event at '%s' (id=%s)", event.kind, device_name, event.event_id
             )
 
-            try:
-                jpeg_bytes = await self._ring_client.async_get_device_snapshot(device_name)
-            except Exception as e:
-                logger.warning("Ring watcher could not fetch a snapshot for '%s': %s", device_name, e)
-                continue
-
             self._last_reacted_at[device_name] = time.monotonic()
 
             if self._play_emotion is not None:
@@ -204,6 +237,24 @@ class RingWatcherEngine:
                     except Exception as e:
                         logger.warning("Ring watcher could not play emotion '%s': %s", emotion, e)
 
-            nudge_template = _NUDGE_TEMPLATES.get(event.kind, "(Something happened at {device} — look and react.)")
+            if event.kind == "ding" and self._config.door_call_mode == "auto" and self._answer_ding is not None:
+                try:
+                    await self._answer_ding(device_name)
+                except Exception as e:
+                    logger.warning("Ring watcher could not answer the doorbell at '%s': %s", device_name, e)
+                continue
+
+            try:
+                jpeg_bytes = await self._ring_client.async_get_device_snapshot(device_name)
+            except Exception as e:
+                logger.warning("Ring watcher could not fetch a snapshot for '%s': %s", device_name, e)
+                continue
+
+            if event.kind == "ding" and self._config.door_call_mode == "ask":
+                nudge_text = _DOOR_CALL_ASK_TEMPLATE.format(device=device_name)
+            else:
+                nudge_template = _NUDGE_TEMPLATES.get(event.kind, "(Something happened at {device} — look and react.)")
+                nudge_text = nudge_template.format(device=device_name)
+
             b64_image = base64.b64encode(jpeg_bytes).decode("utf-8")
-            await self._send_prompt(b64_image, nudge_template.format(device=device_name))
+            await self._send_prompt(b64_image, nudge_text)

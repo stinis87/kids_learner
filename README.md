@@ -215,6 +215,8 @@ The default profile exposes these tools. Custom profiles can enable a different 
 | `switch_profile` | Switch Reachy's active personality profile by voice (e.g. "let's read a bedtime story", "go back to normal"). | Core install only. Restarts the realtime session, same as switching profiles from the UI. |
 | `check_ring_camera` | Fetch a fresh snapshot from one Ring camera (by the name configured in the Ring app) or all of them at once, and describe what's happening. | Core install only. Requires a one-time `--ring-login`. See [Ring cameras](#advanced-features). |
 | `check_ring_history` | Answer retroactive questions about a Ring camera's motion/doorbell events for a given day ("today", "yesterday", "day before yesterday", or a `YYYY-MM-DD` date), and optionally describe what the most recent one looked like. | Core install only. Requires a one-time `--ring-login`. Describing an event additionally requires `ffmpeg` and an active Ring Protect subscription. See [Ring cameras](#advanced-features). |
+| `talk_to_door` | Open a live two-way audio call with a Ring doorbell/camera, so Reachy's speech is also spoken through that device's speaker and it can hear whoever is near it. | Core install only. Requires a one-time `--ring-login`. See [Ring doorbell calls](#advanced-features). |
+| `end_door_call` | Hang up the active live doorbell call. | Core install only. See [Ring doorbell calls](#advanced-features). |
 
 > [!NOTE]
 > `remember`/`forget` facts are stored in `memory.v1.json` inside the app's instance data directory (`~/.local/share/reachy_mini_conversation_app/` by default, or the instance path used by the desktop launcher). `forget` only removes facts matched by query. To reset all remembered facts, delete this file.
@@ -267,6 +269,25 @@ The token is a single Ring account credential shared by the whole app (not per-i
 **Asking about the past**: `check_ring_history` answers questions like "was anyone at the front door today?", "how many times did the doorbell ring yesterday?", or "what happened in the garden on 2024-01-05?" — day names ("today"/"yesterday"/"day before yesterday") and locations both also understand Norwegian ("i dag"/"i går"/"i forgårs", "hage", "framsiden"), the same way `check_ring_camera` already does for locations. It pages through the device's Ring event history and, for a broad question, reports back only counts and timestamps — fast, and requires nothing beyond the same login as `check_ring_camera`. When the question is about a specific event — the most recent one, an ordinal like "the second one" or "the earliest", or an approximate clock time like "the 2pm one" ("andre", "første", "kl. 14" in Norwegian) — it additionally downloads that event's recorded clip and extracts a handful of stills spread across it for Reachy to describe, since the realtime backend only ever looks at still images, never video — Reachy is instructed to say it's checking and might take a moment before this slower step, rather than going quiet. That step needs:
 - an active **Ring Protect subscription** (Ring only lets recordings be downloaded with one — without it, Reachy will say so instead of failing silently), and
 - **`ffmpeg`** installed and on `PATH` (e.g. `brew install ffmpeg` on macOS, `apt install ffmpeg` on Debian/Ubuntu, or the [official builds](https://ffmpeg.org/download.html) on Windows) — used to pull frames out of the downloaded clip. Nothing is written to disk beyond a temporary file deleted immediately after extraction.
+
+</details>
+
+<details>
+<summary><b>Ring doorbell calls</b></summary>
+
+Beyond snapshots, Reachy can open a live two-way audio call with a Ring doorbell or camera and talk through it, using the same personality, voice, and tools as the rest of the conversation. This uses `ring_doorbell`'s experimental WebRTC live-view signaling together with [`aiortc`](https://github.com/aiortc/aiortc) for the actual audio, against a device's own speaker and microphone — it requires a model that has both (most video doorbells/battery cams qualify; a camera-only device would only support hearing, not speaking).
+
+Two ways to start a call:
+- **On request, any time** — say something like "let me talk to the front door" or "tell the person outside I'm coming". Reachy calls the `talk_to_door` tool and, from then on, its replies are spoken both in the room and through the device's speaker, and it can hear whoever is near it.
+- **On a doorbell ring** — controlled per profile by `door_call_mode` in `ring_watcher.txt` (see [`profiles/default/ring_watcher.txt`](profiles/default/ring_watcher.txt)):
+  - `ask` (default) — a "ding" has Reachy ask out loud whether it should answer the door itself or let you talk, then opens the call accordingly based on your reply.
+  - `auto` — opens the call immediately with no question asked, so Reachy answers fully on its own.
+  - `off` — back to the original snapshot-only nudge, no call ever offered.
+
+  Motion events are unaffected by `door_call_mode` and always just get the usual snapshot nudge.
+
+Either way, say goodbye or ask to hang up and Reachy calls `end_door_call` to close the call; it also closes automatically after 5 minutes as a safety cutoff, or if the visitor's end disconnects first. Requires the same one-time `--ring-login` as `check_ring_camera`.
+
 
 </details>
 

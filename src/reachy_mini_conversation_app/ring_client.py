@@ -425,6 +425,12 @@ class RingClient:
         matching_device = _match_device(ring.video_devices(), location)
         return await _get_snapshot_with_retry(ring, matching_device)
 
+    async def async_get_call_device(self, location: str) -> RingDoorBell:
+        """Return the Ring device matching `location`, for opening a two-way audio call."""
+        ring = await self._get_ring()
+        await ring.async_update_devices()
+        return _match_device(ring.video_devices(), location)
+
     async def async_get_history_for_day(self, location: str, day: str) -> RingHistorySummary:
         """Return the device's motion/ding events for `day` ('today', 'yesterday', or 'YYYY-MM-DD')."""
         ring = await self._get_ring()

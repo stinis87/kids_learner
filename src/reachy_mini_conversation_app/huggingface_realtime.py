@@ -5,6 +5,7 @@ import base64
 import random
 import asyncio
 import logging
+import contextlib
 from typing import Any, Final, Tuple, Optional
 
 import httpx
@@ -41,7 +42,9 @@ from reachy_mini_conversation_app.prompts import (
     get_session_instructions,
     get_session_greeting_prompt,
 )
+from reachy_mini_conversation_app.ring_call import RingCallError, RingCallSession
 from reachy_mini_conversation_app.streaming import AdditionalOutputs, audio_to_int16
+from reachy_mini_conversation_app.ring_client import RingNotConfiguredError, RingDeviceNotFoundError
 from reachy_mini_conversation_app.ring_watcher import RingWatcherEngine
 from reachy_mini_conversation_app.ring_watcher import load_config as load_ring_watcher_config
 from reachy_mini_conversation_app.proactive_vision import ProactiveVisionEngine
@@ -62,6 +65,10 @@ from reachy_mini_conversation_app.tools.background_tool_manager import (
 
 
 logger = logging.getLogger(__name__)
+
+# Safety cutoff so a doorbell call can't get stuck open forever (e.g. the far
+# end never hangs up and no silence timeout logic catches it).
+_DOOR_CALL_MAX_DURATION_S: Final[float] = 5 * 60.0
 
 _RESPONSE_DONE_TIMEOUT: Final[float] = 30.0
 _RESPONSE_REJECTION_RETRY_DELAY: Final[float] = 0.5
@@ -168,6 +175,13 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         self._proactive_vision: ProactiveVisionEngine | None = None
         self._ring_watcher: RingWatcherEngine | None = None
         self._voice_effect_state = VoiceEffectState()
+
+        # Live doorbell call (see start_door_call/end_door_call): routes this
+        # conversation's audio to and from a Ring device's mic/speaker.
+        self._door_call: RingCallSession | None = None
+        self._door_call_location: str | None = None
+        self._door_call_reader_task: asyncio.Task[None] | None = None
+        self._door_call_timeout_task: asyncio.Task[None] | None = None
 
     @staticmethod
     def _sanitize_tool_result_for_model(tool_name: str, tool_result: dict[str, Any]) -> dict[str, Any]:
@@ -547,9 +561,16 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
             is_ready=lambda: self.connection is not None and self._response_done_event.is_set(),
             send_prompt=self._send_image_nudge_prompt,
             play_emotion=self._react_to_ring_event,
+            answer_ding=self._answer_door_ding,
         )
         self._ring_watcher.start()
         logger.info("Ring watcher enabled for profile %r: %s", profile, watcher_config)
+
+    async def _answer_door_ding(self, location: str) -> None:
+        """Auto-answer a new doorbell ding by opening a live call, for RingWatcherEngine."""
+        result = await self.start_door_call(location)
+        if "error" in result:
+            logger.warning("Ring watcher could not auto-answer '%s': %s", location, result["error"])
 
     async def _react_to_ring_event(self, emotion: str) -> None:
         """Play a physical emotion reaction for a new Ring event, via the normal tool dispatch path."""
@@ -604,6 +625,115 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
             logger.info("Queued image nudge prompt: %s", nudge_text)
         except Exception as e:
             logger.warning("Failed to queue image nudge prompt: %s", e)
+
+    async def _send_text_nudge_prompt(self, nudge_text: str, *, activity_reason: str) -> None:
+        """Inject a text-only nudge, then prompt for a spoken reaction (no image attached)."""
+        if not self.connection:
+            return
+        try:
+            await self.connection.conversation.item.create(
+                item={
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": nudge_text}],
+                },
+            )
+            self._mark_activity(activity_reason)
+            await self._safe_response_create()
+            logger.info("Queued text nudge prompt: %s", nudge_text)
+        except Exception as e:
+            logger.warning("Failed to queue text nudge prompt: %s", e)
+
+    async def start_door_call(self, location: str) -> dict[str, Any]:
+        """Open a live two-way audio call with a Ring device and route it through this conversation."""
+        if self.deps.ring_client is None:
+            return {"error": "Ring is not configured."}
+        if self._door_call is not None:
+            return {"error": f"Already on a call with '{self._door_call_location}'. End it first."}
+
+        try:
+            device = await self.deps.ring_client.async_get_call_device(location)
+        except (RingNotConfiguredError, RingDeviceNotFoundError) as e:
+            return {"error": str(e)}
+        except Exception as e:
+            logger.error("Failed to resolve Ring device '%s' for a call: %s", location, e)
+            return {"error": f"Failed to resolve '{location}': {type(e).__name__}: {e}"}
+
+        session = RingCallSession(device)
+        try:
+            await session.start()
+        except RingCallError as e:
+            logger.warning("Could not start doorbell call with '%s': %s", device.name, e)
+            return {"error": str(e)}
+
+        self._door_call = session
+        self._door_call_location = device.name
+        self._door_call_reader_task = asyncio.create_task(
+            self._pump_door_call_audio_in(session), name="door-call-audio-in"
+        )
+        self._door_call_timeout_task = asyncio.create_task(
+            self._door_call_safety_timeout(session), name="door-call-safety-timeout"
+        )
+
+        logger.info("Doorbell call with '%s' started", device.name)
+        await self._send_text_nudge_prompt(
+            f"(You're now on a live call with a person at {device.name} — talk to them.)",
+            activity_reason="door_call_started",
+        )
+        return {"status": "connected", "location": device.name}
+
+    async def end_door_call(self, *, reason: str = "hangup") -> dict[str, Any]:
+        """Close the active doorbell call, if any, and let the model know it ended."""
+        session = self._door_call
+        if session is None:
+            return {"error": "No active doorbell call."}
+
+        self._door_call = None
+        location = self._door_call_location
+        self._door_call_location = None
+
+        current_task = asyncio.current_task()
+        for task in (self._door_call_reader_task, self._door_call_timeout_task):
+            if task is None or task is current_task:
+                continue
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._door_call_reader_task = None
+        self._door_call_timeout_task = None
+
+        await session.close()
+        logger.info("Doorbell call with '%s' ended (%s)", location, reason)
+        await self._send_text_nudge_prompt(
+            f"(The call with the person at {location} has ended.)",
+            activity_reason="door_call_ended",
+        )
+        return {"status": "ended", "location": location}
+
+    async def _pump_door_call_audio_in(self, session: RingCallSession) -> None:
+        """Forward the doorbell call's inbound audio straight into the model, bypassing the wake-word gate."""
+        try:
+            async for pcm in session.receive_audio():
+                if not self.connection:
+                    continue
+                try:
+                    audio_message = base64.b64encode(pcm.tobytes()).decode("utf-8")
+                    await self.connection.input_audio_buffer.append(audio=audio_message)
+                    self._mark_activity("door_call_audio_in")
+                except Exception as e:
+                    logger.debug("Dropping doorbell call audio frame: connection not ready (%s)", e)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self._door_call is session:
+                await self.end_door_call(reason="remote_hangup")
+
+    async def _door_call_safety_timeout(self, session: RingCallSession) -> None:
+        """Hang up a doorbell call that's run past the safety cutoff."""
+        await asyncio.sleep(_DOOR_CALL_MAX_DURATION_S)
+        if self._door_call is session:
+            logger.info("Doorbell call with '%s' reached max duration; hanging up.", self._door_call_location)
+            await self.end_door_call(reason="max_duration_reached")
 
     async def _send_startup_greeting_prompt(self) -> None:
         """Prompt the model to open the conversation once the session is ready."""
@@ -1015,6 +1145,8 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                             self._turn_first_audio_at = time.perf_counter()
                             delta_ms = (self._turn_first_audio_at - self._turn_user_done_at) * 1000
                             logger.info("Turn latency: first audio delta %.0f ms after user transcript", delta_ms)
+                        if self._door_call is not None:
+                            self._door_call.send_audio(decoded_pcm.reshape(-1))
                         await self.output_queue.put(
                             (
                                 self.SAMPLE_RATE,
@@ -1175,6 +1307,9 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         if self._ring_watcher is not None:
             await self._ring_watcher.stop()
             self._ring_watcher = None
+
+        if self._door_call is not None:
+            await self.end_door_call(reason="shutdown")
 
         # Stop background tool manager tasks (listener + cleanup)
         await self.tool_manager.shutdown()

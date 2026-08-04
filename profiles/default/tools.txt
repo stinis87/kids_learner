@@ -5,6 +5,8 @@ stop_emotion
 camera
 check_ring_camera
 check_ring_history
+talk_to_door
+end_door_call
 idle_do_nothing
 move_head
 go_to_sleep

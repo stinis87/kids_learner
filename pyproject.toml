@@ -30,6 +30,9 @@ dependencies = [
 
     #Ring camera snapshots (unofficial, reverse-engineered API; no official Ring SDK exists)
     "ring-doorbell>=0.9.7",
+
+    #WebRTC media for two-way audio calls with a Ring device (live view / doorbell talk)
+    "aiortc>=1.9.0",
 ]
 
 [dependency-groups]
