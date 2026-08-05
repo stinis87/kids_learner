@@ -288,6 +288,8 @@ Two ways to start a call:
 
 Either way, say goodbye or ask to hang up and Reachy calls `end_door_call` to close the call; it also closes automatically after 5 minutes as a safety cutoff, or if the visitor's end disconnects first. Requires the same one-time `--ring-login` as `check_ring_camera`.
 
+> [!NOTE]
+> During a call, the visitor's voice and the room's voice both feed the same conversation — there's no way to tell them apart at the audio level, so both have equal access to whatever they say to Reachy. To limit what a visitor could reach this way, `remember`, `forget`, `go_to_sleep`, `switch_profile`, and `check_ring_camera` are blocked for everyone for the duration of any call, regardless of who is speaking.
 
 </details>
 

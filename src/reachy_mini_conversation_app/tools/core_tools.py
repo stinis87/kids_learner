@@ -31,6 +31,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Audio from an active doorbell call is fed into the same conversation as the
+# room mic (see huggingface_realtime.py's _pump_door_call_audio_in), so a
+# visitor at the door has the same voice access as the person in the room.
+# These tools stay blocked for everyone while a call is active, since a
+# visitor could otherwise reach them just by talking to Reachy.
+DOOR_CALL_BLOCKED_TOOLS = frozenset({"remember", "forget", "go_to_sleep", "switch_profile", "check_ring_camera"})
+
 
 class MissingToolFileError(FileNotFoundError):
     """Raised when a requested tool file is absent on disk."""
@@ -51,6 +58,7 @@ class ToolDependencies:
     ring_client: "RingClient | None" = None
     start_door_call: Callable[[str], Awaitable[dict[str, Any]]] | None = None
     end_door_call: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    is_door_call_active: Callable[[], bool] | None = None
 
 
 class ToolSpec(TypedDict):
@@ -552,6 +560,9 @@ async def _dispatch_tool_call(tool_name: str, args: Dict[str, Any], deps: ToolDe
     tool = ALL_TOOLS.get(tool_name)
     if not tool:
         return {"error": f"unknown tool: {tool_name}"}
+    if tool_name in DOOR_CALL_BLOCKED_TOOLS and deps.is_door_call_active is not None and deps.is_door_call_active():
+        logger.warning("Blocked tool '%s' while a doorbell call is active", tool_name)
+        return {"error": f"'{tool_name}' is not available while a doorbell call is active"}
     try:
         return await tool(deps, **args)
     except asyncio.CancelledError:

@@ -644,6 +644,10 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         except Exception as e:
             logger.warning("Failed to queue text nudge prompt: %s", e)
 
+    def is_door_call_active(self) -> bool:
+        """Whether a live doorbell call is currently open, for tool access gating."""
+        return self._door_call is not None
+
     async def start_door_call(self, location: str) -> dict[str, Any]:
         """Open a live two-way audio call with a Ring device and route it through this conversation."""
         if self.deps.ring_client is None:

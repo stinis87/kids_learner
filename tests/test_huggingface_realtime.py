@@ -536,6 +536,28 @@ async def test_start_door_call_returns_error_when_ring_not_configured() -> None:
 
 
 @pytest.mark.asyncio
+async def test_is_door_call_active_reflects_call_lifecycle(monkeypatch: Any) -> None:
+    """is_door_call_active() is False when idle, True during a call, and False again after hangup."""
+    monkeypatch.setattr(hf_mod, "RingCallSession", lambda device: _FakeDoorCallSession())
+
+    device = MagicMock()
+    device.name = "Front Door"
+    ring_client = MagicMock()
+    ring_client.async_get_call_device = AsyncMock(return_value=device)
+
+    handler = HuggingFaceRealtimeHandler(_door_call_deps(ring_client))
+    handler.connection = AsyncMock()
+
+    assert handler.is_door_call_active() is False
+
+    await handler.start_door_call("Front Door")
+    assert handler.is_door_call_active() is True
+
+    await handler.end_door_call()
+    assert handler.is_door_call_active() is False
+
+
+@pytest.mark.asyncio
 async def test_start_door_call_opens_a_session_and_nudges_the_model(monkeypatch: Any) -> None:
     """A resolved device opens a RingCallSession and queues a text-only nudge about the call."""
     fake_session = _FakeDoorCallSession()

@@ -200,6 +200,7 @@ def run(
     deps.apply_personality = handler.apply_personality
     deps.start_door_call = getattr(handler, "start_door_call", None)
     deps.end_door_call = getattr(handler, "end_door_call", None)
+    deps.is_door_call_active = getattr(handler, "is_door_call_active", None)
 
     stream_manager: LocalStream | None = None
     own_ui_server = None
