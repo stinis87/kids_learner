@@ -115,6 +115,7 @@ class RingCallSession:
         @self._pc.on("track")
         def _on_track(track: MediaStreamTrack) -> None:
             if track.kind == "audio" and self._reader_task is None:
+                logger.info("Ring call with '%s': inbound audio track received, starting reader", self._device.name)
                 self._reader_task = asyncio.create_task(self._read_inbound(track))
 
     async def start(self) -> None:
@@ -171,11 +172,15 @@ class RingCallSession:
 
     async def _read_inbound(self, track: MediaStreamTrack) -> None:
         """Pull frames from the remote audio track, resample them, and queue PCM16 chunks."""
+        received_first_frame = False
         try:
             while True:
                 frame = await track.recv()
                 if not isinstance(frame, AudioFrame):
                     continue
+                if not received_first_frame:
+                    logger.info("Ring call with '%s': first inbound audio frame received", self._device.name)
+                    received_first_frame = True
                 for resampled in self._resampler.resample(frame):
                     pcm = np.frombuffer(bytes(resampled.planes[0]), dtype=np.int16, count=resampled.samples)
                     await self._inbound_frames.put(pcm.copy())
