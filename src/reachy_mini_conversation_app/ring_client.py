@@ -12,14 +12,15 @@ import time
 import asyncio
 import logging
 from pathlib import Path
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from datetime import time as clock_time
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import httpx
-from ring_doorbell import Auth, Ring, RingError, AuthenticationError
+from ring_doorbell import Auth, Ring, RingError, RingEventListener, AuthenticationError
+from ring_doorbell.event import RingEvent as _PushRingEvent
 from ring_doorbell.doorbot import RingDoorBell
 
 from reachy_mini_conversation_app.video_frames import FfmpegNotAvailableError, async_extract_evenly_spaced_frames
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 RING_USER_AGENT = "reachy-mini-conversation-app"
 RING_TOKEN_CACHE_FILENAME = "ring_token.v1.json"
 RING_TOKEN_CACHE_PATH_ENV = "RING_TOKEN_CACHE_PATH"
+RING_FCM_CREDENTIALS_CACHE_FILENAME = "ring_fcm_credentials.v1.json"
 
 # ring_doorbell's bundled `async_get_snapshot` polls a legacy Ring endpoint that
 # no longer reliably serves images (see
@@ -103,11 +105,6 @@ class RingHistorySummary:
 # Shared with ring_watcher.py so both the proactive watcher and this retroactive
 # history query agree on what counts as an "event".
 WATCHED_HISTORY_KINDS = ("motion", "ding")
-
-# How many recent history entries to scan per device when looking for the latest
-# event of a given kind — Ring's history is newest-first, so this only needs to be
-# large enough to skip past a few unrelated kinds (e.g. on_demand) between events.
-_HISTORY_LOOKBACK = 10
 
 # Paging size/cap when scanning a full day of history for `async_get_history_for_day`.
 # Ring's `older_than` cursor pages by event id with no native date filter, so we page
@@ -245,18 +242,27 @@ def _select_event(events: list[RingEvent], selector: str) -> RingEvent:
     raise RingEventNotFoundError(f"Could not understand which event '{selector}' refers to.")
 
 
+def _cache_path(filename: str, instance_path: str | Path | None = None) -> Path:
+    """Return the app's per-instance data directory path for `filename`."""
+    if instance_path is not None:
+        return Path(instance_path).expanduser() / filename
+
+    data_home = os.getenv("XDG_DATA_HOME")
+    data_root = Path(data_home).expanduser() if data_home else Path.home() / ".local" / "share"
+    return data_root / "reachy_mini_conversation_app" / filename
+
+
 def token_cache_path(instance_path: str | Path | None = None) -> Path:
     """Return the path used to persist the cached Ring OAuth token."""
     override = os.getenv(RING_TOKEN_CACHE_PATH_ENV)
     if override:
         return Path(override).expanduser()
+    return _cache_path(RING_TOKEN_CACHE_FILENAME, instance_path)
 
-    if instance_path is not None:
-        return Path(instance_path).expanduser() / RING_TOKEN_CACHE_FILENAME
 
-    data_home = os.getenv("XDG_DATA_HOME")
-    data_root = Path(data_home).expanduser() if data_home else Path.home() / ".local" / "share"
-    return data_root / "reachy_mini_conversation_app" / RING_TOKEN_CACHE_FILENAME
+def fcm_credentials_cache_path(instance_path: str | Path | None = None) -> Path:
+    """Return the path used to persist the cached FCM push-registration credentials."""
+    return _cache_path(RING_FCM_CREDENTIALS_CACHE_FILENAME, instance_path)
 
 
 def write_token_cache(path: Path, token: dict[str, object]) -> None:
@@ -390,10 +396,15 @@ class RingClient:
     def __init__(self, instance_path: str | Path | None = None) -> None:
         """Store the token cache path; the Ring session is created lazily."""
         self._token_cache_path = token_cache_path(instance_path)
+        self._fcm_credentials_cache_path = fcm_credentials_cache_path(instance_path)
         self._ring: Ring | None = None
+        self._event_listener: RingEventListener | None = None
 
     def _save_token(self, token: dict[str, object]) -> None:
         write_token_cache(self._token_cache_path, token)
+
+    def _save_fcm_credentials(self, credentials: dict[str, object]) -> None:
+        write_token_cache(self._fcm_credentials_cache_path, credentials)
 
     async def _get_ring(self) -> Ring:
         """Return a Ring session created from the cached token, refreshing as needed."""
@@ -492,36 +503,56 @@ class RingClient:
 
         return event, frames
 
-    async def async_get_latest_events(self, kinds: tuple[str, ...]) -> dict[str, RingEvent]:
-        """Return each device's most recent history entry whose kind is in `kinds`.
+    async def async_start_event_listener(self, on_event: Callable[[RingEvent], None]) -> bool:
+        """Start listening for Ring push notifications, delivered in near real time over FCM.
 
-        Devices with no matching history are omitted from the result. A device
-        that fails to return history (e.g. a transient Ring API error) is
-        skipped rather than failing the whole call, so one flaky camera can't
-        block checking the others.
+        `on_event` is called for every new "motion"/"ding" notification (see
+        `WATCHED_HISTORY_KINDS`) using the same underlying push mechanism as the
+        Ring app itself, rather than polling event history on an interval. Returns
+        whether the listener started successfully; a checkin/subscription failure
+        returns False rather than raising.
         """
         ring = await self._get_ring()
-        await ring.async_update_devices()
 
-        events: dict[str, RingEvent] = {}
-        for device in ring.video_devices():
-            try:
-                history = await device.async_history(limit=_HISTORY_LOOKBACK)
-            except (RingError, RuntimeError) as e:
-                logger.warning("Failed to fetch Ring history for '%s': %s", device.name, e)
-                continue
+        cached_credentials: dict[str, object] | None = None
+        if self._fcm_credentials_cache_path.is_file():
+            cached_credentials = json.loads(self._fcm_credentials_cache_path.read_text())
 
-            latest = next((entry for entry in history if entry.get("kind") in kinds), None)
-            if latest is None:
-                continue
-
-            events[device.name] = RingEvent(
-                device_name=device.name,
-                event_id=latest["id"],
-                kind=latest["kind"],
-                created_at=latest["created_at"],
+        def _forward_event(push_event: _PushRingEvent) -> None:
+            # `is_update` marks a duplicate notification for the same event (e.g. battery
+            # doorbells send a second push once the recording/image is ready) — only react
+            # to the first one.
+            if push_event.kind not in WATCHED_HISTORY_KINDS or push_event.is_update:
+                return
+            on_event(
+                RingEvent(
+                    device_name=push_event.device_name,
+                    event_id=push_event.id,
+                    kind=push_event.kind,
+                    created_at=datetime.fromtimestamp(push_event.now, tz=UTC),
+                )
             )
-        return events
+
+        self._event_listener = RingEventListener(
+            ring,
+            credentials=cached_credentials,
+            credentials_updated_callback=self._save_fcm_credentials,
+        )
+        self._event_listener.add_notification_callback(_forward_event)
+        started = await self._event_listener.start()
+        if not started:
+            logger.warning("Ring push event listener failed to start; check the cached Ring login.")
+        return started
+
+    async def async_stop_event_listener(self) -> None:
+        """Stop the push event listener, if one is running."""
+        if self._event_listener is not None:
+            await self._event_listener.stop()
+            self._event_listener = None
+
+    def is_event_listener_active(self) -> bool:
+        """Return whether the push event listener is currently connected and running."""
+        return self._event_listener is not None and self._event_listener.started
 
     async def async_list_locations(self) -> list[str]:
         """Return the friendly names of all doorbell/camera devices on the account."""
@@ -530,7 +561,8 @@ class RingClient:
         return [device.name for device in ring.video_devices()]
 
     async def async_close(self) -> None:
-        """Close the underlying HTTP session, if one was ever created."""
+        """Stop the event listener and close the underlying HTTP session, if either ran."""
+        await self.async_stop_event_listener()
         if self._ring is not None:
             await self._ring.auth.async_close()
             self._ring = None

@@ -1,6 +1,7 @@
 """Tests for the Ring event watcher's config loading and reaction logic."""
 
 import time
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -21,24 +22,21 @@ def test_load_config_enabled_by_default_without_marker_file(tmp_path: Path) -> N
 
 def test_load_config_reads_custom_timings(tmp_path: Path) -> None:
     """Marker file values should override the defaults."""
-    (tmp_path / "ring_watcher.txt").write_text(
-        "poll_interval_seconds=5\ndevice_cooldown_seconds=30\n",
-        encoding="utf-8",
-    )
+    (tmp_path / "ring_watcher.txt").write_text("device_cooldown_seconds=30\n", encoding="utf-8")
 
     result = load_config(tmp_path)
 
-    assert result == RingWatcherConfig(poll_interval_seconds=5, device_cooldown_seconds=30)
+    assert result == RingWatcherConfig(device_cooldown_seconds=30)
 
 
 def test_load_config_falls_back_to_defaults_for_missing_keys(tmp_path: Path) -> None:
     """Unset keys should keep their default value."""
-    (tmp_path / "ring_watcher.txt").write_text("poll_interval_seconds=15\n", encoding="utf-8")
+    (tmp_path / "ring_watcher.txt").write_text("door_call_mode=auto\n", encoding="utf-8")
 
     result = load_config(tmp_path)
 
     assert result is not None
-    assert result.poll_interval_seconds == 15
+    assert result.door_call_mode == "auto"
     assert result.device_cooldown_seconds == RingWatcherConfig().device_cooldown_seconds
 
 
@@ -88,54 +86,51 @@ def _event(device_name: str, event_id: int, kind: str = "motion") -> RingEvent:
     return RingEvent(device_name=device_name, event_id=event_id, kind=kind, created_at=None)  # type: ignore[arg-type]
 
 
-def _fake_ring_client(events: dict[str, RingEvent], snapshot: bytes = b"\xff\xd8jpeg\xff\xd9") -> MagicMock:
+def _fake_ring_client(snapshot: bytes = b"\xff\xd8jpeg\xff\xd9") -> MagicMock:
     client = MagicMock()
-    client.async_get_latest_events = AsyncMock(return_value=events)
+    client.async_start_event_listener = AsyncMock(return_value=True)
+    client.async_stop_event_listener = AsyncMock()
+    client.is_event_listener_active = MagicMock(return_value=True)
     client.async_get_device_snapshot = AsyncMock(return_value=snapshot)
     return client
 
 
 @pytest.mark.asyncio
-async def test_first_poll_seeds_without_reacting() -> None:
-    """The very first poll should record existing events but never react to them."""
-    sent: list[tuple[str, str]] = []
-
-    async def send_prompt(b64_image: str, nudge: str) -> None:
-        sent.append((b64_image, nudge))
-
-    ring_client = _fake_ring_client({"Garden": _event("Garden", 1)})
+async def test_start_subscribes_to_the_push_listener_with_the_configured_client() -> None:
+    """Starting the watcher subscribes to Ring push notifications via the client."""
+    ring_client = _fake_ring_client()
     engine = RingWatcherEngine(
-        RingWatcherConfig(device_cooldown_seconds=0),
+        RingWatcherConfig(),
         ring_client=ring_client,
         is_ready=lambda: True,
-        send_prompt=send_prompt,
+        send_prompt=AsyncMock(),
     )
 
-    await engine._poll_once()
+    engine.start()
+    await asyncio.sleep(0)  # let the listen task run once before stopping it
+    await engine.stop()
 
-    assert sent == []
-    ring_client.async_get_device_snapshot.assert_not_awaited()
+    ring_client.async_start_event_listener.assert_awaited_once()
+    ring_client.async_stop_event_listener.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_new_event_after_seeding_triggers_a_reaction() -> None:
-    """A genuinely new event id after the seeding poll should fetch a snapshot and react."""
+async def test_new_event_triggers_a_reaction() -> None:
+    """A pushed event should fetch a snapshot and prompt the model to react."""
     sent: list[tuple[str, str]] = []
 
     async def send_prompt(b64_image: str, nudge: str) -> None:
         sent.append((b64_image, nudge))
 
-    ring_client = _fake_ring_client({"Garden": _event("Garden", 1)})
+    ring_client = _fake_ring_client()
     engine = RingWatcherEngine(
         RingWatcherConfig(device_cooldown_seconds=0),
         ring_client=ring_client,
         is_ready=lambda: True,
         send_prompt=send_prompt,
     )
-    await engine._poll_once()  # seeding poll
 
-    ring_client.async_get_latest_events = AsyncMock(return_value={"Garden": _event("Garden", 2)})
-    await engine._poll_once()
+    await engine._react_to_event(_event("Garden", 1))
 
     assert len(sent) == 1
     assert "Garden" in sent[0][1]
@@ -150,7 +145,7 @@ async def test_new_event_triggers_play_emotion_reaction() -> None:
     async def play_emotion(emotion: str) -> None:
         played.append(emotion)
 
-    ring_client = _fake_ring_client({"Garden": _event("Garden", 1)})
+    ring_client = _fake_ring_client()
     engine = RingWatcherEngine(
         RingWatcherConfig(device_cooldown_seconds=0),
         ring_client=ring_client,
@@ -158,10 +153,8 @@ async def test_new_event_triggers_play_emotion_reaction() -> None:
         send_prompt=AsyncMock(),
         play_emotion=play_emotion,
     )
-    await engine._poll_once()  # seeding poll
 
-    ring_client.async_get_latest_events = AsyncMock(return_value={"Garden": _event("Garden", 2, kind="motion")})
-    await engine._poll_once()
+    await engine._react_to_event(_event("Garden", 1, kind="motion"))
 
     assert played == ["attentive"]
 
@@ -174,7 +167,7 @@ async def test_ding_event_triggers_excited_emotion() -> None:
     async def play_emotion(emotion: str) -> None:
         played.append(emotion)
 
-    ring_client = _fake_ring_client({"Front Door": _event("Front Door", 1, kind="ding")})
+    ring_client = _fake_ring_client()
     engine = RingWatcherEngine(
         RingWatcherConfig(device_cooldown_seconds=0),
         ring_client=ring_client,
@@ -182,10 +175,8 @@ async def test_ding_event_triggers_excited_emotion() -> None:
         send_prompt=AsyncMock(),
         play_emotion=play_emotion,
     )
-    await engine._poll_once()  # seeding poll
 
-    ring_client.async_get_latest_events = AsyncMock(return_value={"Front Door": _event("Front Door", 2, kind="ding")})
-    await engine._poll_once()
+    await engine._react_to_event(_event("Front Door", 1, kind="ding"))
 
     assert played == ["excited"]
 
@@ -201,7 +192,7 @@ async def test_play_emotion_failure_does_not_block_the_spoken_reaction() -> None
     async def failing_play_emotion(emotion: str) -> None:
         raise RuntimeError("movement manager unavailable")
 
-    ring_client = _fake_ring_client({"Garden": _event("Garden", 1)})
+    ring_client = _fake_ring_client()
     engine = RingWatcherEngine(
         RingWatcherConfig(device_cooldown_seconds=0),
         ring_client=ring_client,
@@ -209,10 +200,8 @@ async def test_play_emotion_failure_does_not_block_the_spoken_reaction() -> None
         send_prompt=send_prompt,
         play_emotion=failing_play_emotion,
     )
-    await engine._poll_once()  # seeding poll
 
-    ring_client.async_get_latest_events = AsyncMock(return_value={"Garden": _event("Garden", 2)})
-    await engine._poll_once()
+    await engine._react_to_event(_event("Garden", 1))
 
     assert len(sent) == 1
 
@@ -225,40 +214,17 @@ async def test_ding_event_uses_doorbell_nudge_wording() -> None:
     async def send_prompt(b64_image: str, nudge: str) -> None:
         sent.append((b64_image, nudge))
 
-    ring_client = _fake_ring_client({"Front Door": _event("Front Door", 1, kind="ding")})
+    ring_client = _fake_ring_client()
     engine = RingWatcherEngine(
-        RingWatcherConfig(device_cooldown_seconds=0),
+        RingWatcherConfig(device_cooldown_seconds=0, door_call_mode="off"),
         ring_client=ring_client,
         is_ready=lambda: True,
         send_prompt=send_prompt,
     )
-    await engine._poll_once()  # seeding poll
 
-    ring_client.async_get_latest_events = AsyncMock(return_value={"Front Door": _event("Front Door", 2, kind="ding")})
-    await engine._poll_once()
+    await engine._react_to_event(_event("Front Door", 1, kind="ding"))
 
     assert "doorbell" in sent[0][1]
-
-
-@pytest.mark.asyncio
-async def test_same_event_id_does_not_react_again() -> None:
-    """Polling again with an unchanged event id must not re-trigger a reaction."""
-    sent: list[tuple[str, str]] = []
-
-    async def send_prompt(b64_image: str, nudge: str) -> None:
-        sent.append((b64_image, nudge))
-
-    ring_client = _fake_ring_client({"Garden": _event("Garden", 1)})
-    engine = RingWatcherEngine(
-        RingWatcherConfig(device_cooldown_seconds=0),
-        ring_client=ring_client,
-        is_ready=lambda: True,
-        send_prompt=send_prompt,
-    )
-    await engine._poll_once()  # seeding poll
-    await engine._poll_once()  # same event id again
-
-    assert sent == []
 
 
 @pytest.mark.asyncio
@@ -269,20 +235,40 @@ async def test_device_cooldown_suppresses_rapid_repeat_reactions() -> None:
     async def send_prompt(b64_image: str, nudge: str) -> None:
         sent.append((b64_image, nudge))
 
-    ring_client = _fake_ring_client({"Garden": _event("Garden", 1)})
+    ring_client = _fake_ring_client()
     engine = RingWatcherEngine(
         RingWatcherConfig(device_cooldown_seconds=120),
         ring_client=ring_client,
         is_ready=lambda: True,
         send_prompt=send_prompt,
     )
-    await engine._poll_once()  # seeding poll
     engine._last_reacted_at["Garden"] = time.monotonic()
 
-    ring_client.async_get_latest_events = AsyncMock(return_value={"Garden": _event("Garden", 2)})
-    await engine._poll_once()
+    await engine._react_to_event(_event("Garden", 2))
 
     assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_ding_bypasses_cooldown_from_a_recent_motion_reaction() -> None:
+    """A doorbell ring shouldn't be suppressed by a cooldown started by a prior motion event."""
+    sent: list[tuple[str, str]] = []
+
+    async def send_prompt(b64_image: str, nudge: str) -> None:
+        sent.append((b64_image, nudge))
+
+    ring_client = _fake_ring_client()
+    engine = RingWatcherEngine(
+        RingWatcherConfig(device_cooldown_seconds=120, door_call_mode="off"),
+        ring_client=ring_client,
+        is_ready=lambda: True,
+        send_prompt=send_prompt,
+    )
+    engine._last_reacted_at["Front Door"] = time.monotonic()  # simulate the just-reacted motion event
+
+    await engine._react_to_event(_event("Front Door", 2, kind="ding"))
+
+    assert len(sent) == 1
 
 
 @pytest.mark.asyncio
@@ -293,43 +279,32 @@ async def test_not_ready_suppresses_reaction() -> None:
     async def send_prompt(b64_image: str, nudge: str) -> None:
         sent.append((b64_image, nudge))
 
-    ring_client = _fake_ring_client({"Garden": _event("Garden", 1)})
+    ring_client = _fake_ring_client()
     engine = RingWatcherEngine(
         RingWatcherConfig(device_cooldown_seconds=0),
         ring_client=ring_client,
         is_ready=lambda: False,
         send_prompt=send_prompt,
     )
-    await engine._poll_once()  # seeding poll
 
-    ring_client.async_get_latest_events = AsyncMock(return_value={"Garden": _event("Garden", 2)})
-    await engine._poll_once()
+    await engine._react_to_event(_event("Garden", 1))
 
     assert sent == []
 
 
 @pytest.mark.asyncio
-async def test_snapshot_failure_for_one_device_does_not_block_reaction_tracking() -> None:
-    """A failed snapshot fetch shouldn't crash the poll loop or corrupt event tracking."""
-    sent: list[tuple[str, str]] = []
-
-    async def send_prompt(b64_image: str, nudge: str) -> None:
-        sent.append((b64_image, nudge))
-
-    ring_client = _fake_ring_client({"Garden": _event("Garden", 1)})
+async def test_snapshot_failure_does_not_crash_the_reaction() -> None:
+    """A failed snapshot fetch shouldn't raise out of the reaction handler."""
+    ring_client = _fake_ring_client()
+    ring_client.async_get_device_snapshot = AsyncMock(side_effect=RuntimeError("device asleep"))
     engine = RingWatcherEngine(
         RingWatcherConfig(device_cooldown_seconds=0),
         ring_client=ring_client,
         is_ready=lambda: True,
-        send_prompt=send_prompt,
+        send_prompt=AsyncMock(),
     )
-    await engine._poll_once()  # seeding poll
 
-    ring_client.async_get_latest_events = AsyncMock(return_value={"Garden": _event("Garden", 2)})
-    ring_client.async_get_device_snapshot = AsyncMock(side_effect=RuntimeError("device asleep"))
-    await engine._poll_once()
-
-    assert sent == []
+    await engine._react_to_event(_event("Garden", 1))  # must not raise
 
 
 @pytest.mark.asyncio
@@ -344,7 +319,7 @@ async def test_ding_event_answers_the_call_when_door_call_mode_is_auto() -> None
     async def answer_ding(device_name: str) -> None:
         answered.append(device_name)
 
-    ring_client = _fake_ring_client({"Front Door": _event("Front Door", 1, kind="ding")})
+    ring_client = _fake_ring_client()
     engine = RingWatcherEngine(
         RingWatcherConfig(device_cooldown_seconds=0, door_call_mode="auto"),
         ring_client=ring_client,
@@ -352,10 +327,8 @@ async def test_ding_event_answers_the_call_when_door_call_mode_is_auto() -> None
         send_prompt=send_prompt,
         answer_ding=answer_ding,
     )
-    await engine._poll_once()  # seeding poll
 
-    ring_client.async_get_latest_events = AsyncMock(return_value={"Front Door": _event("Front Door", 2, kind="ding")})
-    await engine._poll_once()
+    await engine._react_to_event(_event("Front Door", 1, kind="ding"))
 
     assert answered == ["Front Door"]
     assert sent == []
@@ -374,7 +347,7 @@ async def test_ding_event_asks_before_answering_by_default() -> None:
     async def answer_ding(device_name: str) -> None:
         answered.append(device_name)
 
-    ring_client = _fake_ring_client({"Front Door": _event("Front Door", 1, kind="ding")})
+    ring_client = _fake_ring_client()
     engine = RingWatcherEngine(
         RingWatcherConfig(device_cooldown_seconds=0),
         ring_client=ring_client,
@@ -382,10 +355,8 @@ async def test_ding_event_asks_before_answering_by_default() -> None:
         send_prompt=send_prompt,
         answer_ding=answer_ding,
     )
-    await engine._poll_once()  # seeding poll
 
-    ring_client.async_get_latest_events = AsyncMock(return_value={"Front Door": _event("Front Door", 2, kind="ding")})
-    await engine._poll_once()
+    await engine._react_to_event(_event("Front Door", 1, kind="ding"))
 
     assert answered == []
     assert len(sent) == 1
@@ -404,7 +375,7 @@ async def test_ding_event_falls_back_to_plain_image_nudge_when_door_call_mode_is
     async def answer_ding(device_name: str) -> None:
         answered.append(device_name)
 
-    ring_client = _fake_ring_client({"Front Door": _event("Front Door", 1, kind="ding")})
+    ring_client = _fake_ring_client()
     engine = RingWatcherEngine(
         RingWatcherConfig(device_cooldown_seconds=0, door_call_mode="off"),
         ring_client=ring_client,
@@ -412,10 +383,8 @@ async def test_ding_event_falls_back_to_plain_image_nudge_when_door_call_mode_is
         send_prompt=send_prompt,
         answer_ding=answer_ding,
     )
-    await engine._poll_once()  # seeding poll
 
-    ring_client.async_get_latest_events = AsyncMock(return_value={"Front Door": _event("Front Door", 2, kind="ding")})
-    await engine._poll_once()
+    await engine._react_to_event(_event("Front Door", 1, kind="ding"))
 
     assert answered == []
     assert len(sent) == 1
@@ -434,7 +403,7 @@ async def test_motion_event_never_answers_the_call_even_when_door_call_mode_is_a
     async def answer_ding(device_name: str) -> None:
         answered.append(device_name)
 
-    ring_client = _fake_ring_client({"Garden": _event("Garden", 1, kind="motion")})
+    ring_client = _fake_ring_client()
     engine = RingWatcherEngine(
         RingWatcherConfig(device_cooldown_seconds=0, door_call_mode="auto"),
         ring_client=ring_client,
@@ -442,10 +411,8 @@ async def test_motion_event_never_answers_the_call_even_when_door_call_mode_is_a
         send_prompt=send_prompt,
         answer_ding=answer_ding,
     )
-    await engine._poll_once()  # seeding poll
 
-    ring_client.async_get_latest_events = AsyncMock(return_value={"Garden": _event("Garden", 2, kind="motion")})
-    await engine._poll_once()
+    await engine._react_to_event(_event("Garden", 1, kind="motion"))
 
     assert answered == []
     assert len(sent) == 1
@@ -458,7 +425,7 @@ async def test_answer_ding_failure_does_not_crash_the_poll_loop() -> None:
     async def answer_ding(device_name: str) -> None:
         raise RuntimeError("Ring rejected the call")
 
-    ring_client = _fake_ring_client({"Front Door": _event("Front Door", 1, kind="ding")})
+    ring_client = _fake_ring_client()
     engine = RingWatcherEngine(
         RingWatcherConfig(device_cooldown_seconds=0, door_call_mode="auto"),
         ring_client=ring_client,
@@ -466,7 +433,5 @@ async def test_answer_ding_failure_does_not_crash_the_poll_loop() -> None:
         send_prompt=AsyncMock(),
         answer_ding=answer_ding,
     )
-    await engine._poll_once()  # seeding poll
 
-    ring_client.async_get_latest_events = AsyncMock(return_value={"Front Door": _event("Front Door", 2, kind="ding")})
-    await engine._poll_once()  # must not raise
+    await engine._react_to_event(_event("Front Door", 1, kind="ding"))  # must not raise

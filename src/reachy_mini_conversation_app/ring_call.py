@@ -24,9 +24,16 @@ from ring_doorbell import RingError
 from av.audio.resampler import AudioResampler
 from aiortc.mediastreams import MediaStreamError, MediaStreamTrack
 from ring_doorbell.doorbot import RingDoorBell
+from ring_doorbell.webrtcstream import RingWebRtcStream
 
 
 logger = logging.getLogger(__name__)
+
+# Ring's own webrtc session dies ``keep_alive_timeout`` seconds after activation
+# unless kept alive; ping well under that so a brief network hiccup doesn't lose
+# the call.
+_KEEP_ALIVE_TIMEOUT_S = 30
+_KEEP_ALIVE_INTERVAL_S = 15
 
 # The realtime conversation loop bridges audio at this rate in both
 # directions (matches HuggingFaceRealtimeHandler.SAMPLE_RATE), so no
@@ -101,6 +108,8 @@ class RingCallSession:
         self._resampler = AudioResampler(format="s16", layout="mono", rate=CALL_SAMPLE_RATE)
         self._inbound_frames: asyncio.Queue[NDArray[np.int16] | None] = asyncio.Queue()
         self._reader_task: asyncio.Task[None] | None = None
+        self._session_id: str | None = None
+        self._keep_alive_task: asyncio.Task[None] | None = None
         self._closed = False
 
         @self._pc.on("track")
@@ -113,14 +122,38 @@ class RingCallSession:
         offer = await self._pc.createOffer()
         await self._pc.setLocalDescription(offer)
         assert self._pc.localDescription is not None
+        offer_sdp = self._pc.localDescription.sdp
 
         try:
-            answer_sdp = await self._device.generate_webrtc_stream(self._pc.localDescription.sdp)
+            answer_sdp = await self._device.generate_webrtc_stream(offer_sdp, keep_alive_timeout=_KEEP_ALIVE_TIMEOUT_S)
         except RingError as e:
             await self._pc.close()
             raise RingCallError(f"Ring rejected the call for '{self._device.name}': {e}") from e
 
         await self._pc.setRemoteDescription(RTCSessionDescription(sdp=answer_sdp, type="answer"))
+
+        # Ring closes the session `keep_alive_timeout` seconds after activation unless
+        # pinged; without this, the call would silently die well before a real
+        # conversation with a visitor could happen.
+        self._session_id = RingWebRtcStream.get_sdp_session_id(offer_sdp)
+        if self._session_id is not None:
+            self._keep_alive_task = asyncio.create_task(self._keep_alive_loop(self._session_id))
+        else:
+            logger.warning(
+                "Could not extract a session id from the SDP offer for '%s'; call may time out", self._device.name
+            )
+
+    async def _keep_alive_loop(self, session_id: str) -> None:
+        """Periodically ping Ring to keep the call's session from timing out."""
+        try:
+            while True:
+                await asyncio.sleep(_KEEP_ALIVE_INTERVAL_S)
+                try:
+                    await self._device.keep_alive_webrtc_stream(session_id)
+                except Exception as e:
+                    logger.warning("Failed to keep alive doorbell call with '%s': %s", self._device.name, e)
+        except asyncio.CancelledError:
+            raise
 
     def send_audio(self, pcm: NDArray[np.int16]) -> None:
         """Queue mono PCM16 audio at `CALL_SAMPLE_RATE` to play out the Ring device's speaker."""
@@ -156,10 +189,14 @@ class RingCallSession:
             await self._inbound_frames.put(None)
 
     async def close(self) -> None:
-        """Close the WebRTC session and stop the inbound reader."""
+        """Close the WebRTC session and stop the inbound reader and keep-alive loop."""
         if self._closed:
             return
         self._closed = True
+        if self._keep_alive_task is not None:
+            self._keep_alive_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._keep_alive_task
         if self._reader_task is not None:
             self._reader_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

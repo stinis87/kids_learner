@@ -134,59 +134,124 @@ async def test_snapshot_gives_up_after_exhausting_retries(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_latest_events_returns_most_recent_matching_kind_per_device() -> None:
-    """Each device's newest history entry matching the requested kinds is returned."""
-    garden = _fake_device(
-        "Garden",
-        history=[_history_entry(2, "motion"), _history_entry(1, "on_demand")],
+async def test_start_event_listener_forwards_matching_push_notifications() -> None:
+    """A pushed ding/motion notification is translated into our RingEvent and forwarded."""
+    from ring_doorbell.event import RingEvent as PushRingEvent
+
+    fake_listener = MagicMock()
+    fake_listener.add_notification_callback = MagicMock()
+    fake_listener.start = AsyncMock(return_value=True)
+
+    client = RingClient()
+    client._get_ring = AsyncMock(return_value=MagicMock())
+
+    received: list[object] = []
+    with patch("reachy_mini_conversation_app.ring_client.RingEventListener", return_value=fake_listener):
+        started = await client.async_start_event_listener(received.append)
+
+    assert started is True
+    forward = fake_listener.add_notification_callback.call_args.args[0]
+    forward(
+        PushRingEvent(
+            id=42,
+            doorbot_id=1,
+            device_name="Front Door",
+            device_kind="doorbell",
+            now=1_700_000_000.0,
+            expires_in=180,
+            kind="ding",
+            state="ringing",
+        )
     )
-    front_door = _fake_device(
-        "Front Door",
-        history=[_history_entry(5, "ding"), _history_entry(4, "motion")],
+
+    assert len(received) == 1
+    assert received[0].device_name == "Front Door"
+    assert received[0].event_id == 42
+    assert received[0].kind == "ding"
+
+
+@pytest.mark.asyncio
+async def test_start_event_listener_ignores_unwatched_kinds_and_updates() -> None:
+    """Kinds outside WATCHED_HISTORY_KINDS and duplicate 'is_update' pushes are dropped."""
+    from ring_doorbell.event import RingEvent as PushRingEvent
+
+    fake_listener = MagicMock()
+    fake_listener.add_notification_callback = MagicMock()
+    fake_listener.start = AsyncMock(return_value=True)
+
+    client = RingClient()
+    client._get_ring = AsyncMock(return_value=MagicMock())
+
+    received: list[object] = []
+    with patch("reachy_mini_conversation_app.ring_client.RingEventListener", return_value=fake_listener):
+        await client.async_start_event_listener(received.append)
+
+    forward = fake_listener.add_notification_callback.call_args.args[0]
+    forward(
+        PushRingEvent(
+            id=1,
+            doorbot_id=1,
+            device_name="Bod",
+            device_kind="camera",
+            now=1.0,
+            expires_in=180,
+            kind="on_demand",
+            state="",
+        )
     )
-    client = _client_with_devices([garden, front_door])
+    forward(
+        PushRingEvent(
+            id=2,
+            doorbot_id=1,
+            device_name="Front Door",
+            device_kind="doorbell",
+            now=1.0,
+            expires_in=180,
+            kind="ding",
+            state="ringing",
+            is_update=True,
+        )
+    )
 
-    events = await client.async_get_latest_events(("motion", "ding"))
-
-    assert events["Garden"].event_id == 2
-    assert events["Garden"].kind == "motion"
-    assert events["Front Door"].event_id == 5
-    assert events["Front Door"].kind == "ding"
-
-
-@pytest.mark.asyncio
-async def test_latest_events_skips_unmatched_kinds() -> None:
-    """A device whose most recent entries are all outside the requested kinds is omitted."""
-    bod = _fake_device("Bod", history=[_history_entry(9, "on_demand")])
-    client = _client_with_devices([bod])
-
-    events = await client.async_get_latest_events(("motion", "ding"))
-
-    assert "Bod" not in events
+    assert received == []
 
 
 @pytest.mark.asyncio
-async def test_latest_events_omits_device_with_no_history() -> None:
-    """A device with an empty history simply doesn't appear in the result."""
-    bod = _fake_device("Bod", history=[])
-    client = _client_with_devices([bod])
+async def test_start_event_listener_returns_false_on_subscription_failure() -> None:
+    """A checkin/subscription failure returns False instead of raising."""
+    fake_listener = MagicMock()
+    fake_listener.add_notification_callback = MagicMock()
+    fake_listener.start = AsyncMock(return_value=False)
 
-    events = await client.async_get_latest_events(("motion", "ding"))
+    client = RingClient()
+    client._get_ring = AsyncMock(return_value=MagicMock())
 
-    assert events == {}
+    with patch("reachy_mini_conversation_app.ring_client.RingEventListener", return_value=fake_listener):
+        started = await client.async_start_event_listener(MagicMock())
+
+    assert started is False
 
 
 @pytest.mark.asyncio
-async def test_latest_events_skips_device_on_history_error() -> None:
-    """One device's history fetch failing doesn't prevent checking the others."""
-    broken = _fake_device("Garden")
-    broken.async_history = AsyncMock(side_effect=RingError("boom"))
-    healthy = _fake_device("Front Door", history=[_history_entry(3, "ding")])
-    client = _client_with_devices([broken, healthy])
+async def test_stop_event_listener_stops_and_clears_the_listener() -> None:
+    """Stopping the listener calls through to the underlying stop() and clears state."""
+    fake_listener = MagicMock()
+    fake_listener.add_notification_callback = MagicMock()
+    fake_listener.start = AsyncMock(return_value=True)
+    fake_listener.stop = AsyncMock()
+    fake_listener.started = True
 
-    events = await client.async_get_latest_events(("motion", "ding"))
+    client = RingClient()
+    client._get_ring = AsyncMock(return_value=MagicMock())
 
-    assert "Garden" not in events
+    with patch("reachy_mini_conversation_app.ring_client.RingEventListener", return_value=fake_listener):
+        await client.async_start_event_listener(MagicMock())
+        assert client.is_event_listener_active() is True
+
+        await client.async_stop_event_listener()
+
+    fake_listener.stop.assert_awaited_once()
+    assert client.is_event_listener_active() is False
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,6 @@
 """Tests for RingCallSession's WebRTC signaling and audio bridging."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from collections.abc import Callable
@@ -43,7 +44,7 @@ class _FakePeerConnection:
         self.added_tracks.append(track)
 
     async def createOffer(self) -> SimpleNamespace:
-        return SimpleNamespace(sdp="offer-sdp", type="offer")
+        return SimpleNamespace(sdp=_VALID_OFFER_SDP, type="offer")
 
     async def setLocalDescription(self, description: SimpleNamespace) -> None:
         self.localDescription = description
@@ -63,7 +64,11 @@ def _fake_device(name: str = "Front Door") -> MagicMock:
     device = MagicMock()
     device.name = name
     device.generate_webrtc_stream = AsyncMock(return_value="answer-sdp")
+    device.keep_alive_webrtc_stream = AsyncMock()
     return device
+
+
+_VALID_OFFER_SDP = "v=0\r\no=- 46117317 2 IN IP4 127.0.0.1\r\ns=-\r\n"
 
 
 class _FakeAudioTrack:
@@ -97,10 +102,51 @@ async def test_start_sends_offer_and_sets_remote_answer() -> None:
         session = RingCallSession(device)
         await session.start()
 
-    device.generate_webrtc_stream.assert_awaited_once_with("offer-sdp")
+    device.generate_webrtc_stream.assert_awaited_once_with(_VALID_OFFER_SDP, keep_alive_timeout=30)
     assert fake_pc.remoteDescription is not None
     assert fake_pc.added_tracks  # outbound track was registered
     await session.close()
+
+
+@pytest.mark.asyncio
+async def test_start_extracts_session_id_and_schedules_keep_alive() -> None:
+    """Starting a call parses the SDP session id and starts a keep-alive background task."""
+    fake_pc = _FakePeerConnection()
+    device = _fake_device()
+    with patch("reachy_mini_conversation_app.ring_call.RTCPeerConnection", return_value=fake_pc):
+        session = RingCallSession(device)
+        await session.start()
+
+        assert session._session_id == "46117317"
+        assert session._keep_alive_task is not None
+        assert not session._keep_alive_task.done()
+
+        await session.close()
+
+    assert session._keep_alive_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_keep_alive_loop_pings_ring_before_the_session_times_out(monkeypatch: object) -> None:
+    """The keep-alive loop periodically pings Ring so the call outlives keep_alive_timeout."""
+    import reachy_mini_conversation_app.ring_call as ring_call_mod
+
+    monkeypatch.setattr(ring_call_mod, "_KEEP_ALIVE_INTERVAL_S", 0.01)
+
+    fake_pc = _FakePeerConnection()
+    device = _fake_device()
+    with patch("reachy_mini_conversation_app.ring_call.RTCPeerConnection", return_value=fake_pc):
+        session = RingCallSession(device)
+        await session.start()
+
+        for _ in range(50):
+            if device.keep_alive_webrtc_stream.await_count > 0:
+                break
+            await asyncio.sleep(0.01)
+
+        await session.close()
+
+    device.keep_alive_webrtc_stream.assert_awaited_with("46117317")
 
 
 @pytest.mark.asyncio
